@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+
+# Local runtime artifacts
+*.part
+*.new
+
+# JetBrains IDE
+.idea/
+.coverage

@@ -1,0 +1,41 @@
+{
+  "name": "dqx-en",
+  "version": "tracks-latest-release",
+  "_comment": "Mirrors upstream dqxclarity's PatchService. Assets are GitHub 'latest release' redirects (no API/auth). 'target' is relative to the install root (the 'DRAGON QUEST X' dir). No checksums published upstream, so sha256/size are omitted; the engine downloads and compares against the installed file for idempotency.",
+  "groups": {
+    "game_files": {
+      "description": "Translated UI/menu/system text (data00000000 archive). Main static translation.",
+      "optional": false,
+      "files": [
+        {
+          "target": "Game/Content/Data/data00000000.win32.dat1",
+          "url": "https://github.com/dqx-translation-project/dqxclarity/releases/latest/download/data00000000.win32.dat1"
+        },
+        {
+          "target": "Game/Content/Data/data00000000.win32.idx",
+          "url": "https://github.com/dqx-translation-project/dqxclarity/releases/latest/download/data00000000.win32.idx"
+        }
+      ]
+    },
+    "config_exe": {
+      "description": "Translated DQXConfig.exe (config tool). Runs under Wine.",
+      "optional": true,
+      "files": [
+        {
+          "target": "Game/DQXConfig.exe",
+          "url": "https://github.com/dqx-translation-project/dqx_en_config/releases/latest/download/DQXConfig.exe"
+        }
+      ]
+    },
+    "launcher_exe": {
+      "description": "Translated DQXLauncher.exe (boot launcher). Runs under Wine.",
+      "optional": true,
+      "files": [
+        {
+          "target": "Boot/DQXLauncher.exe",
+          "url": "https://github.com/dqx-translation-project/dqx_en_launcher/releases/latest/download/DQXLauncher.exe"
+        }
+      ]
+    }
+  }
+}
