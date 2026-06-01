@@ -98,3 +98,16 @@ upstream automatically without hardcoding a version. Originals are backed up bef
 files the patch *adds* (e.g. `data00000000.win32.dat1`) are removed on `restore`. Point
 `config.patch.manifest_url` at a hosted manifest to override the bundled
 `src/dqxclarity/patching/data/default_manifest.json`.
+
+## License & credits
+
+dqxclarity-linux is licensed under the **GNU General Public License v2.0** — see [LICENSE](LICENSE).
+This covers the dqxclarity-linux **source code** only.
+
+It is an independent, Linux-native reimplementation inspired by
+[**dqxclarity**](https://github.com/dqx-translation-project/dqxclarity) by the
+dqx-translation-project, and at `sync` it consumes that community's translation **data** (the
+`dqx_translations` / custom-translations corpora and proper-noun glossary). That data is the
+property of its respective authors and is distributed under their own terms — it is **not** covered
+by this repository's license. Huge thanks to the dqx-translation-project and the wider DQX
+translation community; please support the upstream project.
