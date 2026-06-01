@@ -278,6 +278,7 @@ def test_hook_session_sigterm_handler_sets_stop_and_restores():
             assert callable(handler) and handler is not orig  # our graceful handler installed
             handler(signal.SIGTERM, None)  # simulate the signal delivery
             assert stop.is_set()  # handler only flips stop — never raises
+            assert stop.signaled is True  # ...and records that a TERMINATING signal arrived
     finally:
         # The CM must have restored the ORIGINAL handler on exit (no leaked closure).
         assert signal.getsignal(signal.SIGTERM) is orig

@@ -1019,10 +1019,14 @@ def run(
                     user_quit = True
                     stop.set()
             # hook_session's finally has already restored THIS session's hooks + journal.
-            if game_gone.is_set() and not user_quit:
+            # Re-attach ONLY for a genuine game-gone. A SIGTERM/SIGHUP that lands in the SAME tick
+            # the game vanished sets stop.signaled (via hook_session) even though game_gone is also
+            # set — honour the signal and EXIT rather than looping, so a single `kill <pid>` always
+            # stops the service.
+            if game_gone.is_set() and not user_quit and not getattr(stop, "signaled", False):
                 console.print("[yellow]game closed — waiting for it to return…[/]")
                 continue  # re-attach to the next pid
-            break  # user quit (Ctrl-C) or a duration/SIGTERM stop without game_gone -> exit
+            break  # user quit (Ctrl-C), a duration stop, or a SIGTERM/SIGHUP -> exit
     finally:
         # The CM has restored every session's hooks (and journal); the translator/cache are this
         # command's own PID-INDEPENDENT resources, torn down ONCE after the supervisory loop.

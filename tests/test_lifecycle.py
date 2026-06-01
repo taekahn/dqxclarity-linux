@@ -274,7 +274,9 @@ def run_env(monkeypatch):
     @contextmanager
     def fake_session(mem, pid, hooks, *, console):
         state["sessions"] += 1
-        yield threading.Event()
+        stop = threading.Event()
+        stop.signaled = False  # parity with the real hook_session (which always initializes this)
+        yield stop
 
     monkeypatch.setattr(cli.hookjournal, "hook_session", fake_session)
 
@@ -309,6 +311,19 @@ def _duration_stop(stop, game_gone):
     return 7
 
 
+def _gone_with_signal(stop, game_gone):
+    """serve() outcome: the game vanished AND a SIGTERM/SIGHUP was handled in the same session.
+
+    hook_session's signal handler sets ``stop.signaled``; we simulate that here alongside game_gone
+    so the run() decision must EXIT (honour the signal) rather than re-attach on the game-gone.
+    """
+    if game_gone is not None:
+        game_gone.set()
+    stop.signaled = True
+    stop.set()
+    return 0
+
+
 def test_run_reattaches_on_game_gone_then_exits_on_user_quit(run_env, capsys):
     """(a) serve returns with game_gone -> re-attach (2nd install); next serve is a user quit -> exit."""
     st = run_env["state"]
@@ -323,6 +338,23 @@ def test_run_reattaches_on_game_gone_then_exits_on_user_quit(run_env, capsys):
     assert run_env["translator"].cache.closed is True
     out = capsys.readouterr().out
     assert "game closed" in out    # the re-attach notice printed
+
+
+def test_run_sigterm_during_game_gone_exits_not_reattach(run_env, capsys):
+    """A SIGTERM that lands in the same tick the game vanished EXITS (no infinite re-attach loop)."""
+    st = run_env["state"]
+    # If the loop ignored stop.signaled it would re-attach forever; a single game-gone-with-signal
+    # must terminate after one attach.
+    st["serve_script"] = [_gone_with_signal]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True)
+
+    assert st["installs"] == 1   # attached once; the signal exited instead of re-attaching
+    assert st["serves"] == 1
+    assert st["sessions"] == 1
+    assert run_env["translator"].stopped is True
+    out = capsys.readouterr().out
+    assert "game closed" not in out   # did NOT print the re-attach notice
 
 
 def test_run_keyboardinterrupt_exits_without_reattaching(run_env):

@@ -127,10 +127,16 @@ def hook_session(mem, game_pid: int, hooks, *, console):
     hooks (recovering a PREVIOUS unclean exit's detours); this CM only governs the CURRENT session.
     """
     stop = threading.Event()
+    # `signaled` distinguishes a terminating SIGNAL (SIGTERM/SIGHUP) from any OTHER reason `stop`
+    # gets set — e.g. a supervisory caller flips `stop` because the GAME vanished. A re-attach loop
+    # consults this so it EXITS on a real signal instead of mistaking it for a game-gone event and
+    # looping forever (a `kill <pid>` that lands in the same tick the game closes must still stop us).
+    stop.signaled = False
     orig_term = signal.getsignal(signal.SIGTERM)
     orig_hup = signal.getsignal(signal.SIGHUP)
 
     def _graceful(signum, frame):  # noqa: ANN001, ARG001
+        stop.signaled = True
         stop.set()
 
     signal.signal(signal.SIGTERM, _graceful)
