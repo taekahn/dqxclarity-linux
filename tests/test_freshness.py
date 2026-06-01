@@ -79,3 +79,59 @@ def test_is_db_stale_old_marker_is_stale(cfg_dir):
     assert freshness.is_db_stale(7) is True
     # And NOT stale under a generous threshold.
     assert freshness.is_db_stale(30) is False
+
+
+def _patch_sync_sources(monkeypatch, *, community):
+    """Stub _run_sync's sources: a dummy cache + every download mocked. `community` is the only
+    source that succeeds (returns its value); all others raise a caught network error."""
+    import httpx
+
+    from dqxclarity.translate import community as community_mod
+    from dqxclarity.translate import db as db_mod
+    from dqxclarity.translate import glossary as glossary_mod
+
+    class _DummyCache:
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+        def __len__(self):
+            return 0
+
+    def _boom(*a, **k):
+        raise httpx.HTTPError("network down")  # in every per-step handler's caught set
+
+    monkeypatch.setattr(db_mod, "TranslationCache", _DummyCache)
+    monkeypatch.setattr(community_mod, "sync_community", community)
+    for name in ("sync_all_static", "sync_custom_supplements", "fetch_suppressions",
+                 "fetch_reward_items"):
+        monkeypatch.setattr(community_mod, name, _boom)
+    monkeypatch.setattr(glossary_mod, "sync_glossary", _boom)
+
+
+def test_run_sync_does_not_stamp_marker_on_total_failure(cfg_dir, monkeypatch):
+    """Every source failing -> _run_sync returns False and does NOT stamp the marker, so the next
+    run RETRIES instead of being fooled into thinking the DB is fresh for the whole max-age window."""
+    from dqxclarity import cli
+
+    def _boom(*a, **k):
+        import httpx
+        raise httpx.HTTPError("network down")
+
+    _patch_sync_sources(monkeypatch, community=_boom)
+
+    assert cli._run_sync(cfg_mod.Config()) is False
+    assert not (cfg_dir / "last_sync").exists()  # NOT stamped
+
+
+def test_run_sync_stamps_marker_when_a_source_succeeds(cfg_dir, monkeypatch):
+    """At least one source downloading counts as success: returns True and stamps the marker (so
+    the staleness check stays network-free until it next goes stale)."""
+    from dqxclarity import cli
+
+    _patch_sync_sources(monkeypatch, community=lambda cache: 42)  # only merge.xlsx succeeds
+
+    assert cli._run_sync(cfg_mod.Config()) is True
+    assert (cfg_dir / "last_sync").is_file()  # stamped

@@ -880,7 +880,10 @@ def run(
                           "(one-time, then cached)[/]")
         try:
             _run_sync(cfg)
-        except (httpx.HTTPError, OSError) as e:
+        except Exception as e:  # noqa: BLE001 - best-effort: auto-sync must NEVER abort the session
+            # _run_sync absorbs each source's own network/IO error, but anything escaping it
+            # (e.g. a ValueError from a corrupt upstream sheet, or a cache hiccup) must still not
+            # take down run — the user keeps playing on whatever the cache already holds.
             console.print(f"[yellow]auto-sync failed ({e}); continuing on the cached DB.[/]")
 
     # --- PID-INDEPENDENT setup, built ONCE and reused across every (re-)attach ----------------- #
