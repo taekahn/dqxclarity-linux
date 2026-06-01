@@ -858,9 +858,20 @@ def run(
     # normal whole-string path). The suppression index is built even when empty so the pre-pass
     # wiring stays uniform; reward_items defaults to {} so build_quest_translate_fn still produces a
     # valid router. When a needed snapshot is missing we print a one-line hint to run `sync`.
+    names = [h.strip() for h in hooks.split(",") if h.strip()]
+    # Only a hook that declares reward fields (the quest hook) consumes the reward-item snapshot, so
+    # skip that local read entirely when no such surface was requested. reward_field_indices is a
+    # STATIC property of the HookSpec registry, so this is decided once here from the requested names
+    # (no pid / no located hooks needed) and reused unchanged across every (re-)attach.
+    wants_reward_items = any(
+        hookmod.HOOKS.get(n) is not None and hookmod.HOOKS[n].reward_field_indices for n in names
+    )
+
     suppressions = load_suppressions_local(_suppressions_path())
     suppression_index = SuppressionIndex(suppressions)
-    reward_items: dict[str, str] = load_reward_items_local(_reward_items_path())
+    reward_items: dict[str, str] = (
+        load_reward_items_local(_reward_items_path()) if wants_reward_items else {}
+    )
 
     def _build_fn(spec):
         """Build the per-surface callback for ``spec`` (PID-independent; see the per-spec comments).
@@ -919,8 +930,7 @@ def run(
         )
         return fn
 
-    names = [h.strip() for h in hooks.split(",") if h.strip()]
-    if not suppressions or not reward_items:
+    if not suppressions or (wants_reward_items and not reward_items):
         console.print(
             "  [dim]Tip: run `dqxclarity sync` to enable bad-string suppression and "
             "quest-reward cleanup.[/]"

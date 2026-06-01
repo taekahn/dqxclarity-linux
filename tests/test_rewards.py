@@ -588,7 +588,7 @@ def _run_capture_installed(monkeypatch, *, hook_names, reward_items=None, suppre
 
     captured = {}
 
-    def _fake_serve(mem, installed, *, stop, on_line=None):
+    def _fake_serve(mem, installed, *, stop, game_gone=None, on_line=None):
         captured["installed"] = installed
         return 0
 
