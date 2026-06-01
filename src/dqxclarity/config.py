@@ -35,6 +35,11 @@ class TranslateConfig:
     player_name_en: str = ""  # e.g. "Taikan"
     sibling_name_ja: str = ""
     sibling_name_en: str = ""
+    # Auto-refresh the translation DB on `run` startup when it's STALE (or never synced). The check
+    # is purely LOCAL (a `last_sync` marker) so a fresh DB adds zero startup cost; only a stale DB
+    # triggers a one-time network sync. `run --no-sync` overrides this. Mirrors patch.auto_apply.
+    auto_sync: bool = True
+    sync_max_age_days: int = 7  # consider the DB stale after this many days since the last sync
 
 
 @dataclass

@@ -592,22 +592,18 @@ def _reward_items_path() -> Path:
     return cfg_mod.CONFIG_DIR / "reward_items.json"
 
 
-@app.command()
-def sync() -> None:
-    """Download the curated community translation datasets into the cache.
+def _run_sync(cfg: cfg_mod.Config) -> bool:
+    """Download the community + static datasets and refresh the local run-time snapshots.
 
-    Pulls ~4k+ human-translated dialogue lines (with <pnplacehold> player-name support) from
-    merge.xlsx, then imports the static translation JSON sources (quests, cutscenes, NPC names,
-    monsters, items, key items). Covered content then renders instantly and perfectly — machine
-    translation is only used for what the community hasn't covered.
-
-    Also refreshes the LOCAL snapshots `run` reads at startup with ZERO network: the BAD STRING
-    suppression list (#23) and the quest-reward item-name dict (#21). One `sync` is the single
-    network pass; `run` only reads the local cache + these two files.
+    This is the shared body behind the `sync` command AND `run`'s staleness-gated auto-refresh.
+    Each sub-step is best-effort (prints a warning and continues on its own network/IO error). When
+    at least one source downloaded, stamps the `last_sync` freshness marker and returns True; when
+    NOTHING ran (every source failed), the marker is NOT stamped and False is returned.
     """
     import tarfile
     import zipfile
 
+    from .translate import freshness
     from .translate.community import (
         fetch_reward_items,
         fetch_suppressions,
@@ -679,9 +675,31 @@ def sync() -> None:
     if not ok:
         console.print("[red]sync failed: no sources could be downloaded.[/]")
         cache.close()
-        raise typer.Exit(code=1)
+        return False
     console.print(f"[bold]{len(cache)}[/] total translations in cache.")
     cache.close()
+    # At least one source ran: stamp the LOCAL freshness marker so `run`'s staleness check stays
+    # network-free until it next goes stale (warnings on best-effort sub-steps don't unset this).
+    freshness.mark_synced()
+    return True
+
+
+@app.command()
+def sync() -> None:
+    """Download the curated community translation datasets into the cache.
+
+    Pulls ~4k+ human-translated dialogue lines (with <pnplacehold> player-name support) from
+    merge.xlsx, then imports the static translation JSON sources (quests, cutscenes, NPC names,
+    monsters, items, key items). Covered content then renders instantly and perfectly — machine
+    translation is only used for what the community hasn't covered.
+
+    Also refreshes the LOCAL snapshots `run` reads at startup with ZERO network: the BAD STRING
+    suppression list (#23) and the quest-reward item-name dict (#21). One `sync` is the single
+    network pass; `run` only reads the local cache + these two files.
+    """
+    cfg = cfg_mod.load()
+    if not _run_sync(cfg):
+        raise typer.Exit(code=1)
 
 
 @app.command(name="import-translations")
@@ -810,6 +828,12 @@ def run(
              "to launch). Requires patch.auto_apply in config. --no-patch skips this and fails "
              "fast if the game isn't running.",
     ),
+    sync: bool = typer.Option(
+        True, "--sync/--no-sync",
+        help="On startup, auto-refresh the translation DB when it's STALE or never synced (a "
+             "purely LOCAL check — a fresh DB does zero network). Requires translate.auto_sync. "
+             "--no-sync skips it; a stale/empty cache never aborts run.",
+    ),
 ) -> None:
     """Live-translate all enabled text surfaces (dialogue, quests, …) in the running game.
 
@@ -838,6 +862,26 @@ def run(
     from .runtime.playernames import build_apply_names
     from .translate.community import load_reward_items_local, load_suppressions_local
     from .translate.suppression import SuppressionIndex
+
+    # --- STALENESS-GATED AUTO-REFRESH (#19) ---------------------------------------------------- #
+    # BEFORE building the translator (so the bulk import never contends with the translator's open
+    # cache connection): if the LOCAL freshness marker says the DB is stale or was never synced,
+    # do a one-time network refresh. The staleness CHECK is purely LOCAL — a fresh DB does ZERO
+    # network here and adds zero startup cost. The refresh itself is best-effort: any network/IO
+    # error prints a warning and CONTINUES, so a stale or empty cache NEVER aborts run (the user can
+    # still play on whatever's cached). --no-sync / translate.auto_sync=False skip the check entirely.
+    from .translate import freshness
+    if sync and cfg.translate.auto_sync and freshness.is_db_stale(cfg.translate.sync_max_age_days):
+        age = freshness.db_age_days()
+        if age is None:
+            console.print("[dim]translation DB not yet synced — refreshing… (one-time, then cached)[/]")
+        else:
+            console.print(f"[dim]translation DB {age:.0f} days old — refreshing… "
+                          "(one-time, then cached)[/]")
+        try:
+            _run_sync(cfg)
+        except (httpx.HTTPError, OSError) as e:
+            console.print(f"[yellow]auto-sync failed ({e}); continuing on the cached DB.[/]")
 
     # --- PID-INDEPENDENT setup, built ONCE and reused across every (re-)attach ----------------- #
     # The translator, suppression index and reward dict depend only on cfg + the LOCAL snapshots

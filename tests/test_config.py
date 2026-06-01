@@ -289,3 +289,27 @@ def test_patch_auto_apply_defaults_true_and_round_trips(cfg_files):
     # And back on round-trips too.
     config_set("patch.auto_apply", "true")
     assert cfg_mod.load().patch.auto_apply is True
+
+
+def test_auto_sync_defaults_and_round_trip(cfg_files):
+    """`run`'s staleness-gated auto-refresh toggle + threshold (#19): correct defaults, and both
+    survive config set/save/load with their declared types (bool / int)."""
+    from dqxclarity.cli import config_set
+
+    # Defaults.
+    tc = TranslateConfig()
+    assert tc.auto_sync is True
+    assert tc.sync_max_age_days == 7 and isinstance(tc.sync_max_age_days, int)
+
+    # Toggle off + change the threshold via the CLI helper (values arrive as raw strings).
+    config_set("translate.auto_sync", "false")
+    config_set("translate.sync_max_age_days", "14")
+    c = cfg_mod.load()
+    assert c.translate.auto_sync is False and isinstance(c.translate.auto_sync, bool)
+    assert c.translate.sync_max_age_days == 14 and isinstance(c.translate.sync_max_age_days, int)
+
+    # And a full save/load round-trip preserves them.
+    back = cfg_mod.load()
+    cfg_mod.save(back)
+    assert cfg_mod.load().translate.auto_sync is False
+    assert cfg_mod.load().translate.sync_max_age_days == 14

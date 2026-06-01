@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import config as cfg_mod
 from .process.discover import GameInstall, discover, find_game_pid
+from .translate import freshness
 
 
 @dataclass
@@ -60,6 +61,21 @@ def run_checks() -> tuple[list[Check], GameInstall | None]:
                 "install_root in config.",
             )
         )
+
+    # Translation-DB freshness (#19): a purely LOCAL signal from the `last_sync` marker — never
+    # synced -> FAIL with a `sync` hint; stale (older than the configured max age) -> FAIL; else OK.
+    max_age = cfg.translate.sync_max_age_days
+    age = freshness.db_age_days()
+    if age is None:
+        checks.append(
+            Check("translation DB", False, "never synced — run `dqxclarity sync`")
+        )
+    elif age > max_age:
+        checks.append(
+            Check("translation DB", False, f"stale ({age:.0f} days) — run `dqxclarity sync`")
+        )
+    else:
+        checks.append(Check("translation DB", True, f"synced {age:.1f} days ago"))
 
     pid = find_game_pid()
     checks.append(

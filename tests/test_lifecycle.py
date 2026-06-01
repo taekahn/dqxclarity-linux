@@ -226,6 +226,20 @@ def run_env(monkeypatch):
     cfg.patch.auto_apply = True
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg)
 
+    # Staleness-gated auto-refresh (#19): keep the harness hermetic — default to a FRESH DB so the
+    # auto-sync never fires (no network), and record any _run_sync call for the gating tests. Tests
+    # that exercise the gate flip is_db_stale / inspect state["sync_calls"].
+    state["sync_calls"] = 0
+    import dqxclarity.translate.freshness as freshness_mod
+    monkeypatch.setattr(freshness_mod, "is_db_stale", lambda max_age: False)
+    monkeypatch.setattr(freshness_mod, "db_age_days", lambda: 0.0)
+
+    def fake_run_sync(c):
+        state["sync_calls"] += 1
+        return True
+
+    monkeypatch.setattr(cli, "_run_sync", fake_run_sync)
+
     # PID-INDEPENDENT objects (module-level names on cli).
     translator = _FakeTranslator()
     monkeypatch.setattr(cli, "_build_translator", lambda c: translator)
@@ -418,6 +432,79 @@ def test_run_no_hooks_installed_exits_and_tears_down(run_env, monkeypatch):
     assert ei.value.exit_code == 1
     assert run_env["translator"].stopped is True   # finally tore it down even on the early exit
     assert run_env["translator"].cache.closed is True
+
+
+# =============================================================================================== #
+# run(): staleness-gated auto-refresh (#19)                                                       #
+# =============================================================================================== #
+
+
+def test_run_stale_db_triggers_one_auto_sync(run_env, monkeypatch):
+    """A STALE (or never-synced) DB triggers exactly ONE _run_sync before serving begins."""
+    import dqxclarity.translate.freshness as freshness_mod
+    monkeypatch.setattr(freshness_mod, "is_db_stale", lambda max_age: True)
+    st = run_env["state"]
+    st["serve_script"] = [_user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, sync=True)
+
+    assert st["sync_calls"] == 1   # the stale DB was refreshed once
+
+
+def test_run_fresh_db_does_not_sync(run_env):
+    """A FRESH DB (the fixture default) performs NO auto-sync — zero network at startup."""
+    st = run_env["state"]
+    st["serve_script"] = [_user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, sync=True)
+
+    assert st["sync_calls"] == 0   # fresh -> the local check short-circuits, no _run_sync
+
+
+def test_run_no_sync_flag_skips_even_when_stale(run_env, monkeypatch):
+    """--no-sync skips the refresh even when the DB is stale (and does no local-vs-network work)."""
+    import dqxclarity.translate.freshness as freshness_mod
+    monkeypatch.setattr(freshness_mod, "is_db_stale", lambda max_age: True)
+    st = run_env["state"]
+    st["serve_script"] = [_user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, sync=False)
+
+    assert st["sync_calls"] == 0
+
+
+def test_run_auto_sync_disabled_skips_even_when_stale(run_env, monkeypatch):
+    """translate.auto_sync=False skips the refresh even when stale (config opt-out honoured)."""
+    import dqxclarity.translate.freshness as freshness_mod
+    monkeypatch.setattr(freshness_mod, "is_db_stale", lambda max_age: True)
+    run_env["cfg"].translate.auto_sync = False
+    st = run_env["state"]
+    st["serve_script"] = [_user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, sync=True)
+
+    assert st["sync_calls"] == 0
+
+
+def test_run_auto_sync_failure_does_not_abort_run(run_env, monkeypatch):
+    """A network failure during the auto-refresh prints a warning and run() carries on serving."""
+    import httpx
+
+    import dqxclarity.translate.freshness as freshness_mod
+    monkeypatch.setattr(freshness_mod, "is_db_stale", lambda max_age: True)
+
+    def boom(c):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(cli, "_run_sync", boom)
+    st = run_env["state"]
+    st["serve_script"] = [_user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, sync=True)
+
+    # The run still attached + served despite the failed refresh (no abort).
+    assert st["installs"] == 1
+    assert run_env["translator"].stopped is True
 
 
 # =============================================================================================== #
