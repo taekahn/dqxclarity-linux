@@ -20,3 +20,6 @@ venv/
 # JetBrains IDE
 .idea/
 .coverage
+
+# Claude Code (local tooling settings)
+.claude/
