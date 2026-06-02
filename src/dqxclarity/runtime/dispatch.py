@@ -21,9 +21,47 @@ CONVENTIONS = ((PN, SN), (PC, KYODAI))
 
 _JA_RE = re.compile(r"[぀-ヿ一-鿿]")
 
+# A maximal RUN of Japanese name characters: hiragana (ぁ-ん), katakana (ァ-ヴ plus the prolonged-
+# sound mark ー and iteration marks ヽ ヾ 々), and kanji (一-鿿). Used by _translate_name_runs to
+# carve a battle-message template into name runs vs. everything-else (markers/ASCII/digits/spaces),
+# so only the proper-noun runs are name-ified and the structure around them is preserved verbatim.
+_JA_RUN_RE = re.compile(r"[ぁ-んァ-ヴー一-鿿ヽヾ々]+")
+
 
 def is_japanese(text: str) -> bool:
     return bool(_JA_RE.search(text))
+
+
+def _translate_name_runs(text: str, translator) -> str | None:
+    """NOVEL (no upstream equivalent): name-ify each Japanese run in a battle message in place.
+
+    The network_text battle surface hands us full templates whose captured argument is a Japanese
+    monster/actor name, e.g. ``\\sしびれくらげ\\mしびれくらげ\\e takes <%dB_VALUE> damage!`` (the
+    ``\\s`` ``\\m`` ``\\e`` markers wrap the name + an internal id). We split ``text`` into alternating
+    NON-Japanese and Japanese runs: every non-Japanese stretch (the markers, ASCII words, spaces,
+    digits, punctuation) is preserved VERBATIM and in order; every Japanese run is resolved to a name.
+
+    Name resolution does PLAYER/SIBLING SUBSTITUTION FIRST — this is the headline correctness case:
+    the player ``タイカン`` ("Taikan") collides with a cached monster ``タイカン`` ("Squid"), so an
+    exact match on the live player/sibling JA name must win over the cache lookup. Otherwise the run
+    goes through ``translator.translate_name`` (community/cache hit, else offline romaji).
+
+    NO machine translation / no provider call anywhere here — names are instant (cache or local
+    romaji), so this is safe on the combat hot path with zero lag. The ``\\m…\\e`` internal-id portion
+    is name-ified too, pending live verification. Returns the rebuilt string if it CHANGED, else None.
+    """
+    pja, pen = translator.player_name_ja, translator.player_name_en
+    sja, sen = translator.sibling_name_ja, translator.sibling_name_en
+
+    def resolve(run: str) -> str:
+        if pja and run == pja:
+            return pen or translator.translate_name(run)
+        if sja and run == sja:
+            return sen or translator.translate_name(run)
+        return translator.translate_name(run)
+
+    out = _JA_RUN_RE.sub(lambda m: resolve(m.group(0)), text)
+    return out if out != text else None
 
 
 def _make_community_lookup(cfg, translator):
@@ -362,6 +400,14 @@ NET_GENERIC_CATEGORIES = frozenset({
 # Back-compat alias for the prior name (some callers/tests may import it). Aligned with upstream's 17.
 NETWORK_NAME_CATEGORIES = NET_NAME_CATEGORIES
 
+# NOVEL (no upstream equivalent): battle name-tags. A category CONTAINING any of these is a battle
+# message whose captured Japanese argument is a monster/actor NAME (the standalone tags are in
+# NET_IGNORE today and full templates aren't whitelisted, so both are dropped). When cfg.translate.
+# battle_names is on, build_network_translate_fn routes such a category to _translate_name_runs (the
+# name-ify pass) instead. Number-only battle templates (<%dB_VALUE> etc.) contain no name tag, so
+# they are untouched.
+BATTLE_NAME_TAGS = frozenset({"<%sB_ACTOR>", "<%sB_TARGET>", "<%sB_TARGET2>"})
+
 
 # The Story So Far panel is narrower than the dialogue box; its Japanese is pre-wrapped to ~16-20
 # full-width chars (≈40 half-width EN cols). 38 keeps EN safely inside the panel so no line clips.
@@ -403,6 +449,11 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
 
       1. non-Japanese ``ja`` -> None (leave as-is);
       2. login-screen version noise (category starts with ``Version <%s_MVER``) -> None;
+      2b. NOVEL (no upstream equivalent), gated on ``cfg.translate.battle_names``: a category
+         CONTAINING a battle name-tag (``BATTLE_NAME_TAGS``) -> the name-ify pass
+         (``_translate_name_runs``: player/sibling substitution first, then cache/community/offline
+         romaji — never MT). Runs before the NET_IGNORE/whitelist checks because the standalone battle
+         name tags are in NET_IGNORE and full battle templates aren't whitelisted (both dropped today);
       3. a NET_IGNORE category (battle/UI noise) -> None;
       4. ``ja`` ending in ``自分`` -> "<...>self" (the "<name> uses X on 自分/self" nicety);
       5. a category NOT in the whitelist (NET_TRANSLATE_CATEGORIES) -> None. This is what stops
@@ -433,6 +484,18 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
             return None
         if category.startswith("Version <%s_MVER"):
             return None
+        # NOVEL (no upstream equivalent): name-ify battle monster/actor names. A category CONTAINING a
+        # battle name-tag routes to the name-ify pass (player/sibling substitution first, then cache/
+        # community/offline-romaji — NO MT, so it's instant on the combat hot path; the \m…\e id is
+        # name-ified too, pending live verification). This runs BEFORE the NET_IGNORE/whitelist checks
+        # because the standalone <%sB_TARGET>/<%sB_ACTOR> tags are in NET_IGNORE and full battle
+        # templates aren't whitelisted, so both are dropped today. Number-only battle templates
+        # (<%dB_VALUE> etc.) carry no name tag and are untouched. Gated on the toggle: when
+        # battle_names is False this branch is skipped entirely (exact current behaviour).
+        if getattr(cfg.translate, "battle_names", False) and any(
+            t in category for t in BATTLE_NAME_TAGS
+        ):
+            return _translate_name_runs(ja, translator)
         if category in NET_IGNORE_CATEGORIES:
             return None
         if ja.endswith("自分"):

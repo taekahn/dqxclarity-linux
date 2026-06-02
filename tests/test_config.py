@@ -291,6 +291,24 @@ def test_patch_auto_apply_defaults_true_and_round_trips(cfg_files):
     assert cfg_mod.load().patch.auto_apply is True
 
 
+def test_battle_names_defaults_and_round_trip(cfg_files):
+    """NOVEL battle-name toggle (#battle_names): defaults True, survives config set/save/load as a
+    bool (coerced from the raw string the CLI passes)."""
+    from dqxclarity.cli import config_set
+
+    # Default.
+    assert TranslateConfig().battle_names is True
+
+    # Toggle off via the CLI helper (value arrives as the raw string "false").
+    config_set("translate.battle_names", "false")
+    c = cfg_mod.load()
+    assert c.translate.battle_names is False and isinstance(c.translate.battle_names, bool)
+
+    # And back on round-trips too.
+    config_set("translate.battle_names", "true")
+    assert cfg_mod.load().translate.battle_names is True
+
+
 def test_auto_sync_defaults_and_round_trip(cfg_files):
     """`run`'s staleness-gated auto-refresh toggle + threshold (#19): correct defaults, and both
     survive config set/save/load with their declared types (bool / int)."""
