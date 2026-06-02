@@ -497,7 +497,9 @@ def bench_network(
 
         rows.sort(key=lambda r: r["avg"], reverse=True)
         table = Table(title=f"network_text cold-start sync latency — cache MISSES only ({limit}/cat)")
-        table.add_column("category", style="cyan", no_wrap=True)
+        # Cap + ellipsize the category: full battle templates are long and would otherwise squeeze
+        # the numeric columns down to a single char each.
+        table.add_column("category", style="cyan", max_width=46, overflow="ellipsis", no_wrap=True)
         table.add_column("n", justify="right")
         table.add_column("miss", justify="right")
         table.add_column("cache%", justify="right")
