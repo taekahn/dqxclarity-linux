@@ -457,28 +457,36 @@ def bench_network(
             timed = samples[:limit]
             if not timed:
                 continue
-            latencies: list[float] = []
+            # Time ONLY cache MISSES. A hit is effectively instant (in-memory/DB lookup, no
+            # provider call), so timing it would dilute the signal and make a warm category look
+            # "fast" rather than "cached". The MISS latency IS the cold-start provider round-trip a
+            # hot-SYNC category would block the game thread on — exactly the hot-vs-cold signal.
+            miss_latencies: list[float] = []
             cache_hits = 0
             for s in timed:
                 if translator.lookup(s) is not None:
                     cache_hits += 1
+                    continue  # cached -> ~free; don't time it
                 t0 = time.perf_counter()
                 translator.translate_now(s)
-                latencies.append((time.perf_counter() - t0) * 1000.0)
-            n = len(latencies)
-            ordered = sorted(latencies)
+                miss_latencies.append((time.perf_counter() - t0) * 1000.0)
+            n = len(timed)
+            n_miss = len(miss_latencies)
+            ordered = sorted(miss_latencies)
 
-            def _pct(p: float, _o=ordered, _n=n) -> float:
-                # Nearest-rank percentile (small-n friendly).
+            def _pct(p: float, _o=ordered, _n=n_miss) -> float:
+                # Nearest-rank percentile over the MISS latencies (small-n friendly).
+                if _n == 0:
+                    return 0.0
                 idx = min(_n - 1, max(0, int(round(p * (_n - 1)))))
                 return _o[idx]
 
             rows.append({
                 "category": cat,
                 "n": n,
+                "misses": n_miss,
                 "cache_hit_pct": (cache_hits / n * 100.0) if n else 0.0,
-                "avg": sum(latencies) / n if n else 0.0,
-                "p50": _pct(0.50),
+                "avg": (sum(miss_latencies) / n_miss) if n_miss else 0.0,
                 "p90": _pct(0.90),
                 "max": ordered[-1] if ordered else 0.0,
             })
@@ -488,20 +496,19 @@ def bench_network(
             return
 
         rows.sort(key=lambda r: r["avg"], reverse=True)
-        table = Table(title=f"network_text sync-latency benchmark (limit {limit})")
+        table = Table(title=f"network_text cold-start sync latency — cache MISSES only ({limit}/cat)")
         table.add_column("category", style="cyan", no_wrap=True)
         table.add_column("n", justify="right")
+        table.add_column("miss", justify="right")
         table.add_column("cache%", justify="right")
         table.add_column("avg ms", justify="right")
-        table.add_column("p50 ms", justify="right")
         table.add_column("p90 ms", justify="right")
         table.add_column("max ms", justify="right")
         for r in rows:
             table.add_row(
-                r["category"], str(r["n"]),
+                r["category"], str(r["n"]), str(r["misses"]),
                 f"{r['cache_hit_pct']:.0f}",
-                f"{r['avg']:.1f}", f"{r['p50']:.1f}",
-                f"{r['p90']:.1f}", f"{r['max']:.1f}",
+                f"{r['avg']:.1f}", f"{r['p90']:.1f}", f"{r['max']:.1f}",
             )
         console.print(table)
     finally:

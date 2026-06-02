@@ -107,7 +107,7 @@ class NetworkCaptureRecorder:
             "categories": categories,
         }
 
-    def dump(self, path) -> Path:
+    def dump(self, path: Path | str) -> Path:
         """Write ``report()`` as pretty JSON to ``path`` (atomic write). Returns the Path."""
         path = Path(path)
         report = self.report()

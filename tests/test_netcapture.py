@@ -279,16 +279,22 @@ def test_run_capture_network_installs_capture_fn_and_dumps_report(run_env, tmp_p
 
     captured_fn = {}
 
-    # Intercept the (name, hook, fn) the loop builds so we can drive the installed capture fn.
+    # Intercept the (name, hook, fn) the loop builds and drive the installed capture fn DURING the
+    # serve loop, so the recorder holds data BEFORE run() exits and dumps — proving the end-to-end
+    # record -> dump path (not just an empty-recorder dump).
     import dqxclarity.runtime.dispatch as dispatch_mod
-    orig_serve = dispatch_mod.serve
+    fixture_serve = dispatch_mod.serve  # already the run_env fixture's fake_serve
 
     def capturing_serve(mem, installed, *, stop, game_gone=None, on_line=None):
-        # installed is [(name, hook, fn)]; grab the network_text fn.
         for name, _hook, fn in installed:
             if name == "network_text":
                 captured_fn["fn"] = fn
-        return orig_serve(mem, installed, stop=stop, game_gone=game_gone, on_line=on_line)
+                # simulate network_text traffic while "serving": the pure-observe fn records +
+                # returns None (no MT, no write).
+                assert fn(JA, "<%sM_header>") is None
+                assert fn(EN, "<%sB_VALUE>") is None
+                assert fn(JA2, "<%sM_header>") is None
+        return fixture_serve(mem, installed, stop=stop, game_gone=game_gone, on_line=on_line)
 
     monkeypatch.setattr(dispatch_mod, "serve", capturing_serve)
 
@@ -297,17 +303,13 @@ def test_run_capture_network_installs_capture_fn_and_dumps_report(run_env, tmp_p
 
     cli.run(hooks="network_text", duration=0.0, patch=True, capture_network=out)
 
-    # The installed fn is the pure-observe capture fn: records + returns None.
-    fn = captured_fn["fn"]
-    assert fn(JA, "<%sM_header>") is None
-    assert fn(EN, "<%sB_VALUE>") is None
-
-    # NOTE: the dump in finally fired with whatever the recorder held at exit. We additionally drove
-    # the fn AFTER the loop above (it shares the same recorder), so re-dump to assert the wiring path
-    # works end to end via the file written on exit.
+    # The report dumped on exit must contain exactly what was recorded during the serve loop.
+    assert captured_fn["fn"] is not None
     assert out.exists()
     loaded = json.loads(out.read_text(encoding="utf-8"))
-    assert "totals" in loaded and "categories" in loaded
+    assert loaded["totals"]["calls"] == 3
+    assert loaded["categories"]["<%sM_header>"]["count"] == 2
+    assert loaded["categories"]["<%sB_VALUE>"]["count"] == 1
 
 
 # Local copy of the lifecycle serve outcome (a user Ctrl-C) so this file is self-contained.
