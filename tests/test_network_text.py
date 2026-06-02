@@ -340,7 +340,7 @@ def test_serve_once_uses_explicit_length_not_nul():
 def _cfg(**over):
     tr = SimpleNamespace(
         player_name_ja="", player_name_en="", sibling_name_ja="", sibling_name_en="",
-        wrap_width=46, lines_per_page=0,
+        wrap_width=46, lines_per_page=0, battle_names=False,
     )
     for k, v in over.items():
         setattr(tr, k, v)

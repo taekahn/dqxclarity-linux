@@ -74,7 +74,7 @@ def _cfg(**over):
     """Minimal config stub: the dispatch builders read only cfg.translate.* attributes."""
     tr = SimpleNamespace(
         player_name_ja="", player_name_en="", sibling_name_ja="", sibling_name_en="",
-        wrap_width=46, lines_per_page=3,
+        wrap_width=46, lines_per_page=3, battle_names=True,
     )
     for k, v in over.items():
         setattr(tr, k, v)

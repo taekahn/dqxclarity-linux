@@ -134,12 +134,8 @@ def test_template_with_unresolved_param_tag_and_a_name():
     assert out == "\\sChimaera\\mChimaera\\e takes <%dB_VALUE> damage!"
 
 
-def test_no_machine_translation_on_the_path():
-    # The fake would record mt_called if any MT path fired; the name path must never touch it.
-    t = FakeTranslator()
-    _translate_name_runs("\\sしびれくらげ\\mしびれくらげ\\e", t)
-    assert t.mt_called is False
-
+# NOTE: the "no machine translation" property is enforced end-to-end by the routing tests below,
+# which build a real Translator wired to a LoudProvider that RAISES if any MT call fires.
 
 # ------------------------------------------------------ routing via build_network_translate_fn
 #

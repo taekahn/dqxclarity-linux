@@ -25,7 +25,7 @@ _JA_RE = re.compile(r"[぀-ヿ一-鿿]")
 # sound mark ー and iteration marks ヽ ヾ 々), and kanji (一-鿿). Used by _translate_name_runs to
 # carve a battle-message template into name runs vs. everything-else (markers/ASCII/digits/spaces),
 # so only the proper-noun runs are name-ified and the structure around them is preserved verbatim.
-_JA_RUN_RE = re.compile(r"[ぁ-んァ-ヴー一-鿿ヽヾ々]+")
+_JA_RUN_RE = re.compile(r"[ぁ-んァ-ヺー一-鿿ゝゞヽヾ々]+")
 
 
 def is_japanese(text: str) -> bool:
@@ -492,7 +492,7 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         # templates aren't whitelisted, so both are dropped today. Number-only battle templates
         # (<%dB_VALUE> etc.) carry no name tag and are untouched. Gated on the toggle: when
         # battle_names is False this branch is skipped entirely (exact current behaviour).
-        if getattr(cfg.translate, "battle_names", False) and any(
+        if cfg.translate.battle_names and any(
             t in category for t in BATTLE_NAME_TAGS
         ):
             return _translate_name_runs(ja, translator)
