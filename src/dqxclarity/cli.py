@@ -412,6 +412,103 @@ def translate_text(text: str) -> None:
         console.print(f"[green]{en}[/]")
 
 
+@app.command(name="bench-network")
+def bench_network(
+    capture_json: Path = typer.Argument(
+        ..., help="A capture JSON produced by `run --capture-network`."
+    ),
+    limit: int = typer.Option(20, help="Max samples TIMED per category (honour your network budget)."),
+    japanese_only: bool = typer.Option(
+        True, help="Skip categories with no Japanese samples (nothing to translate)."
+    ),
+) -> None:
+    """Time the SYNC translate path per category from a capture report — tiering latency data.
+
+    OFFLINE (no game needed) but it makes REAL translation calls (cache → provider, i.e. network) for
+    each timed sample, so honour --limit. For every category (skipping no-Japanese categories when
+    --japanese-only), takes up to --limit sample strings; for each it FIRST checks the cache via
+    ``translator.lookup`` (to record cache hits) then times the full sync path
+    ``translator.translate_now`` with perf_counter (ms). Prints a table ranked by avg latency DESC —
+    the slow categories are poor HOT/sync candidates.
+    """
+    import json
+    import time
+
+    report = json.loads(capture_json.read_text(encoding="utf-8"))
+    categories = report.get("categories", {})
+    if not categories:
+        console.print("[yellow]no categories in the capture report.[/]")
+        raise typer.Exit(code=1)
+
+    cfg = cfg_mod.load()
+    translator = _build_translator(cfg)
+    translator.start()
+    console.print(
+        "[yellow]heads-up:[/] this makes REAL translation calls (network) — "
+        f"up to {limit} samples per category."
+    )
+
+    try:
+        rows: list[dict] = []
+        for cat, c in categories.items():
+            samples = c.get("samples", [])
+            if japanese_only and not c.get("japanese", 0):
+                continue
+            timed = samples[:limit]
+            if not timed:
+                continue
+            latencies: list[float] = []
+            cache_hits = 0
+            for s in timed:
+                if translator.lookup(s) is not None:
+                    cache_hits += 1
+                t0 = time.perf_counter()
+                translator.translate_now(s)
+                latencies.append((time.perf_counter() - t0) * 1000.0)
+            n = len(latencies)
+            ordered = sorted(latencies)
+
+            def _pct(p: float, _o=ordered, _n=n) -> float:
+                # Nearest-rank percentile (small-n friendly).
+                idx = min(_n - 1, max(0, int(round(p * (_n - 1)))))
+                return _o[idx]
+
+            rows.append({
+                "category": cat,
+                "n": n,
+                "cache_hit_pct": (cache_hits / n * 100.0) if n else 0.0,
+                "avg": sum(latencies) / n if n else 0.0,
+                "p50": _pct(0.50),
+                "p90": _pct(0.90),
+                "max": ordered[-1] if ordered else 0.0,
+            })
+
+        if not rows:
+            console.print("[yellow]nothing to benchmark (no qualifying categories/samples).[/]")
+            return
+
+        rows.sort(key=lambda r: r["avg"], reverse=True)
+        table = Table(title=f"network_text sync-latency benchmark (limit {limit})")
+        table.add_column("category", style="cyan", no_wrap=True)
+        table.add_column("n", justify="right")
+        table.add_column("cache%", justify="right")
+        table.add_column("avg ms", justify="right")
+        table.add_column("p50 ms", justify="right")
+        table.add_column("p90 ms", justify="right")
+        table.add_column("max ms", justify="right")
+        for r in rows:
+            table.add_row(
+                r["category"], str(r["n"]),
+                f"{r['cache_hit_pct']:.0f}",
+                f"{r['avg']:.1f}", f"{r['p50']:.1f}",
+                f"{r['p90']:.1f}", f"{r['max']:.1f}",
+            )
+        console.print(table)
+    finally:
+        translator.stop()
+        translator.cache.close()
+
+
 @app.command()
 def names(
     interval: float = typer.Option(1.0, "--interval", help="Seconds between scans."),
@@ -834,6 +931,11 @@ def run(
              "purely LOCAL check — a fresh DB does zero network). Requires translate.auto_sync. "
              "--no-sync skips it; a stale/empty cache never aborts run.",
     ),
+    capture_network: Path | None = typer.Option(
+        None, "--capture-network",
+        help="Capture ALL network_text traffic (category + text) to a JSON report instead of "
+             "translating that surface — for tiering analysis. Low-lag pure-observe; dumps on exit.",
+    ),
 ) -> None:
     """Live-translate all enabled text surfaces (dialogue, quests, …) in the running game.
 
@@ -920,6 +1022,23 @@ def run(
         load_reward_items_local(_reward_items_path()) if wants_reward_items else {}
     )
 
+    # --- NETWORK-TEXT CAPTURE MODE (tiering data-gathering) ------------------------------------ #
+    # When --capture-network is set, build ONE recorder BEFORE the supervisory loop. Every (re-)attach
+    # routes network_text to a pure-observe fn that records (category, ja) and returns None (no MT, no
+    # write), accumulating into the SAME recorder across game-gone re-attaches. The dump happens ONCE
+    # in the finally below (so Ctrl-C / game-close / duration / normal exit all flush it).
+    recorder = None
+    # ``isinstance(... Path)`` (not just ``is not None``) so a direct call that leaves the typer
+    # default in place (an OptionInfo sentinel, as the lifecycle tests do) is treated as "not set".
+    if isinstance(capture_network, Path):
+        from .runtime.netcapture import NetworkCaptureRecorder
+
+        recorder = NetworkCaptureRecorder()
+        console.print(
+            "[yellow]network_text CAPTURE mode[/] — observing only (no translation/write) → "
+            f"{capture_network}"
+        )
+
     def _build_fn(spec):
         """Build the per-surface callback for ``spec`` (PID-independent; see the per-spec comments).
 
@@ -947,6 +1066,16 @@ def run(
 
             return fn
         if spec.return_hook:
+            # CAPTURE mode: route network_text to a pure-observe fn that records (category, ja) and
+            # returns None — no MT, no write — so a real playthrough's FULL traffic is captured for
+            # the tiering decision. Matches the surface's fn(ja, category) signature. Other surfaces
+            # (if also requested) keep their normal behaviour.
+            if recorder is not None and spec.name == "network_text":
+                def capture_fn(ja, category, _rec=recorder):
+                    _rec.record(category, ja)
+                    return None
+
+                return capture_fn
             # Return-hook surfaces (network_text) get a CATEGORY-AWARE 2-arg fn(ja, category).
             return build_network_translate_fn(
                 cfg, translator, wrap_width=spec.wrap_width,
@@ -1079,6 +1208,18 @@ def run(
         # command's own PID-INDEPENDENT resources, torn down ONCE after the supervisory loop.
         translator.stop()
         translator.cache.close()
+        # CAPTURE dump: fire on EVERY exit path (Ctrl-C / game-close / duration / normal), once,
+        # after the loop — game-gone re-attaches accumulated into the SAME recorder above.
+        if recorder is not None:
+            from .runtime.netcapture import build_summary_table
+
+            report = recorder.report()
+            out_path = recorder.dump(capture_network)
+            console.print(build_summary_table(report))
+            console.print(
+                f"[green]captured[/] {report['totals']['calls']} calls across "
+                f"{report['totals']['categories']} categories → {out_path}"
+            )
     console.print(f"[green]restored.[/] served {total_served} text fields.")
 
 
