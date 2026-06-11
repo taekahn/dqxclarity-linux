@@ -26,10 +26,12 @@ from dqxclarity.process.detour import (
 )
 from dqxclarity.process.hooks import HOOKS, HookSpec, find_function
 from dqxclarity.runtime.dispatch import (
+    NAME_TAGS,
     NET_GENERIC_CATEGORIES,
     NET_IGNORE_CATEGORIES,
     NET_NAME_CATEGORIES,
     NET_TRANSLATE_CATEGORIES,
+    _is_name_category,
     build_network_translate_fn,
 )
 from dqxclarity.translate.db import TranslationCache
@@ -338,13 +340,21 @@ def test_serve_once_uses_explicit_length_not_nul():
 
 
 def _cfg(**over):
+    # Defaults to the NEW "translate the rest" model (network_translate_all=True); the legacy
+    # whitelist tests pass network_translate_all=False explicitly.
     tr = SimpleNamespace(
         player_name_ja="", player_name_en="", sibling_name_ja="", sibling_name_en="",
-        wrap_width=46, lines_per_page=0, battle_names=False,
+        wrap_width=46, lines_per_page=0, battle_names=False, network_translate_all=True,
     )
     for k, v in over.items():
         setattr(tr, k, v)
     return SimpleNamespace(translate=tr)
+
+
+def _legacy_cfg(**over):
+    """Stub cfg pinned to the legacy whitelist routing (network_translate_all=False)."""
+    over.setdefault("network_translate_all", False)
+    return _cfg(**over)
 
 
 def test_network_translate_fn_non_japanese_returns_none(tmp_path):
@@ -395,7 +405,9 @@ def test_network_translate_fn_kaisetubun_wraps_narrower_than_generic(tmp_path):
 
     c = TranslationCache(tmp_path / "kw.db")
     t = Translator(c, sync_provider=LongProvider())
-    fn = build_network_translate_fn(_cfg(), t, wrap_width=46, lines_per_page=0, sync=True)
+    # Legacy whitelist path: <%sM_00> is a generic whitelisted category, and the sync provider runs
+    # inline (the translate_all path forces async, which would return None on a fresh miss).
+    fn = build_network_translate_fn(_legacy_cfg(), t, wrap_width=46, lines_per_page=0, sync=True)
     recap = fn("ながいものがたりのあらすじ。", "<%sM_kaisetubun>")
     assert recap is not None
     assert max(len(line) for line in recap.split("\n")) <= KAISETUBUN_WRAP
@@ -421,7 +433,8 @@ def test_network_translate_fn_kaisetubun_marks_cutoff_when_taller_than_panel(tmp
 
     c = TranslationCache(tmp_path / "kp.db")
     t = Translator(c, sync_provider=VeryLongProvider())
-    fn = build_network_translate_fn(_cfg(), t, wrap_width=46, lines_per_page=0, sync=True)
+    # Legacy path so the sync provider runs inline (translate_all forces async -> None on a miss).
+    fn = build_network_translate_fn(_legacy_cfg(), t, wrap_width=46, lines_per_page=0, sync=True)
     out = fn("ながいあらすじ。", "<%sM_kaisetubun>")
     assert out is not None
     lines = out.split("\n")
@@ -472,21 +485,25 @@ def test_net_category_set_sizes_match_upstream():
 
 
 def test_network_translate_fn_battle_category_passes_through(tmp_path):
-    # CORE REGRESSION GUARD: a battle/ignore category with a Japanese value is NEVER translated.
-    # This is what stopped player/monster names being mangled every combat hit.
+    # CORE REGRESSION GUARD (LEGACY whitelist path): a battle/ignore category with a Japanese value
+    # is NEVER translated. This is what stopped player/monster names being mangled every combat hit.
+    # (Under the new translate_all model a battle name tag routes to the instant name-ify pass — see
+    # test_translate_all_battle_template_name_ified — but the toggle=False path keeps the drop.)
     c = TranslationCache(tmp_path / "battle.db")
     t = Translator(c)
-    fn = build_network_translate_fn(_cfg(), t)
+    fn = build_network_translate_fn(_legacy_cfg(), t)
     assert "<%sB_ACTOR>" in NET_IGNORE_CATEGORIES
     assert fn("スライム", "<%sB_ACTOR>") is None  # battle actor name left untouched
     assert fn("ホイミ", "<%sB_ACTION>") is None  # battle action left untouched
 
 
 def test_network_translate_fn_unknown_category_passes_through(tmp_path):
-    # An unknown category (in NO upstream set) is non-whitelisted -> pass through.
+    # LEGACY whitelist path: an unknown category (in NO upstream set) is non-whitelisted -> pass
+    # through. (Under translate_all the SAME unknown JP category is instead sent to the async text
+    # path — see test_translate_all_unknown_prose_goes_to_text_path.)
     c = TranslationCache(tmp_path / "unknown.db")
     t = Translator(c)
-    fn = build_network_translate_fn(_cfg(), t)
+    fn = build_network_translate_fn(_legacy_cfg(), t)
     cat = "<%sTOTALLY_UNKNOWN>"
     assert cat not in NET_TRANSLATE_CATEGORIES and cat not in NET_IGNORE_CATEGORIES
     assert fn("なにかの にほんご。", cat) is None
@@ -537,6 +554,149 @@ def test_network_translate_fn_kaisetubun_mt_fallback(tmp_path):
 
     c = TranslationCache(tmp_path / "kai.db")
     t = Translator(c, sync_provider=FastProvider())
-    fn = build_network_translate_fn(_cfg(), t, lines_per_page=0, sync=True)
+    # Legacy path so the SYNC provider translates inline (translate_all forces async -> None on miss;
+    # the async behaviour is covered by test_translate_all_unknown_prose_goes_to_text_path).
+    fn = build_network_translate_fn(_legacy_cfg(), t, lines_per_page=0, sync=True)
     out = fn("むかしむかし、あるところに。", "<%sM_kaisetubun>")
     assert out is not None and "once upon a time" in out.lower()
+
+
+# ------------------------------------------------ FEATURE #12: "translate the rest" (network_translate_all)
+
+
+def test_is_name_category_true_for_name_bearing_categories():
+    # Battle + simple-name + map-name categories are all detected as name-bearing.
+    for cat in (
+        "<%sB_ACTOR>", "<%sB_TARGET>", "<%sB_TARGET2>",
+        "<%sM_pc>", "<%sM_npc>", "<%sC_PC>",
+        "<%sM_name>", "<%sM_NAME>", "<%sL_SENDER_NAME>", "<%sL_HIRYU_NAME>",
+        "<%sM_OWNER>", "<%sL_OWNER>", "<%sL_URINUSI>", "<%sM_hiryu>", "<%sL_HIRYU>",
+        "<%sL_MONSTERNAME>", "<%sC_MERCENARY>",
+        "<%sCAS_gambler>", "<%sCAS_target>", "<%sW_MAP_NAME>", "<%sM_monster>",
+    ):
+        assert _is_name_category(cat), cat
+    # Every curated NAME category is covered.
+    assert all(_is_name_category(c) for c in NET_NAME_CATEGORIES)
+    # A battle TEMPLATE that merely embeds a tag is caught by the substring match.
+    assert _is_name_category("\\sしびれくらげ\\e <%sB_TARGET> takes <%dB_VALUE> damage!")
+
+
+def test_is_name_category_false_for_noise_categories():
+    # Numeric/date/value/version/tag noise categories are NOT name-bearing -> handled by is_japanese
+    # (numbers) or NET_IGNORE, never the name path.
+    for cat in (
+        "<%sB_VALUE>", "<%sB_VALUE2>", "<%sB_RANK>", "<%sParam1>", "<%sParam2>",
+        "<%sM_num1>", "<%sM_plusnum>", "<%sM_dot>", "<%sM_caption>", "<%sM_chat>",
+        "<%s_MVER1>", "<%sW_DELIMITER>", "<%sB_ACTION>", "<%sM_00>", "<%sM_kaisetubun>",
+    ):
+        assert not _is_name_category(cat), cat
+    # Sanity: a handful of the real NET_IGNORE numeric/value categories aren't mis-detected as names.
+    for cat in NET_IGNORE_CATEGORIES:
+        if "VALUE" in cat or "Param" in cat or cat in ("<%sM_dot>", "<%sM_num1>", "<%sM_plusnum>"):
+            assert not _is_name_category(cat), cat
+
+
+def test_translate_all_noise_non_japanese_returns_none(tmp_path):
+    # (a) A NOISE category whose captured value is NOT Japanese (numbers / <@M_..> tag / English) is
+    # dropped by is_japanese -> None, exactly as before (the whitelist was redundant for this).
+    c = TranslationCache(tmp_path / "ta_noise.db")
+    t = Translator(c)
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("12345", "<%sB_VALUE>") is None
+    assert fn("<@M_スライム>", "<%sM_emote>") is None  # tag noise (no Japanese run outside the tag)
+    assert fn("Bob", "<%sM_pc>") is None              # already-English name
+
+
+def test_translate_all_name_category_player_sub_wins_over_monster_collision(tmp_path):
+    # (b) The player タイカン ("Taikan") collides with a cached MONSTER タイカン ("Squid"). In a NAME
+    # category the player-substitution must win -> "Taikan", NOT the colliding "Squid". This is the
+    # headline correctness case; the name path is INSTANT (no MT).
+    c = TranslationCache(tmp_path / "ta_collide.db")
+    c.store("タイカン", "Squid", "community")  # the colliding monster name in the cache
+    t = Translator(c)
+    t.player_name_ja, t.player_name_en = "タイカン", "Taikan"
+    # translate_name would return the cached "Squid"; player-sub in _translate_name_runs precedes it.
+    assert t.translate_name("タイカン") == "Squid"
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("タイカン", "<%sM_pc>") == "Taikan"
+
+
+def test_translate_all_battle_template_is_name_ified(tmp_path):
+    # (c) A battle template (category embeds <%sB_TARGET>) name-ifies its Japanese run via the instant
+    # name path — community hit here — instead of being dropped (legacy) or MT'd (would mangle/lag).
+    c = TranslationCache(tmp_path / "ta_battle.db")
+    c.store("しびれくらげ", "Stingue", "community")
+    t = Translator(c)
+    fn = build_network_translate_fn(_cfg(), t)
+    out = fn("しびれくらげ", "<%sB_TARGET>")
+    assert out == "Stingue"  # name-ified (NOT None, NOT MT)
+
+
+def test_translate_all_unknown_prose_goes_to_async_text_path(tmp_path):
+    # (d) An UNKNOWN Japanese prose category is NO LONGER dropped — it routes to the ASYNC text path:
+    # a cache MISS enqueues a background request and returns None (filled on a later view), WITHOUT
+    # blocking. We assert it enqueues (so it's translate-the-rest, not the old silent drop) and that a
+    # SYNC provider is NOT called inline (proving the prose path is async even though the hook is sync).
+    class LoudSyncProvider:
+        name = "googletranslatefree"
+        called = False
+
+        def available(self):
+            return True
+
+        def translate(self, texts):
+            LoudSyncProvider.called = True
+            return ["INLINE-MT" for _ in texts]
+
+    c = TranslationCache(tmp_path / "ta_prose.db")
+    t = Translator(c, sync_provider=LoudSyncProvider())
+    # sync=True mirrors the network_text HookSpec; translate_all must still force the prose path async.
+    fn = build_network_translate_fn(_cfg(), t, lines_per_page=0, sync=True)
+    cat = "<%sお知らせ>"  # made-up "Important Notice"-style prose category (not name/ignore/version)
+    assert cat not in NET_NAME_CATEGORIES and cat not in NET_IGNORE_CATEGORIES
+    out = fn("だいじなおしらせがあります。", cat)
+    assert out is None                       # cache miss -> enqueued + None (NOT dropped, NOT inline)
+    assert LoudSyncProvider.called is False  # prose path is async -> no inline MT (no game-thread lag)
+    # The miss was ENQUEUED for background MT (translate-the-rest), proving it isn't a silent drop.
+    assert t._q.qsize() > 0
+
+    # And a cache HIT on the same async path returns the community EN immediately.
+    c.store("だいじなおしらせがあります。", "There is an important notice.", "community")
+    assert fn("だいじなおしらせがあります。", cat) == "There is an important notice."
+
+
+def test_translate_all_kaisetubun_prose_is_not_dropped(tmp_path):
+    # (d') The Story So Far recap (<%sM_kaisetubun>) also flows to the async text path: a community hit
+    # renders immediately; it is NOT dropped.
+    c = TranslationCache(tmp_path / "ta_kai.db")
+    ja = "これまでのあらすじ。"
+    c.store(ja, "The story so far.", "community")
+    t = Translator(c)
+    fn = build_network_translate_fn(_cfg(), t, lines_per_page=0)
+    out = fn(ja, "<%sM_kaisetubun>")
+    assert out is not None and "story so far" in out.lower()
+
+
+def test_translate_all_net_ignore_category_still_dropped(tmp_path):
+    # (e) A NET_IGNORE category (high-volume JP chat noise) with Japanese is STILL dropped -> None.
+    c = TranslationCache(tmp_path / "ta_ignore.db")
+    t = Translator(c)
+    fn = build_network_translate_fn(_cfg(), t)
+    assert "<%sM_chat>" in NET_IGNORE_CATEGORIES
+    assert fn("こんにちは みなさん。", "<%sM_chat>") is None
+
+
+def test_translate_all_version_noise_returns_none(tmp_path):
+    # (f) Login-screen version noise is left untouched in the translate_all path too.
+    c = TranslationCache(tmp_path / "ta_ver.db")
+    t = Translator(c)
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("バージョン", "Version <%s_MVER1>") is None
+
+
+def test_translate_all_jibun_suffix_becomes_self(tmp_path):
+    # The 自分 -> "self" nicety still fires (before the name/ignore checks) in the translate_all path.
+    c = TranslationCache(tmp_path / "ta_self.db")
+    t = Translator(c)
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("ホイミを 自分", "<%sM_00>") == "ホイミを self"

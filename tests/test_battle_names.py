@@ -67,11 +67,18 @@ class FakeTranslator:
 
 
 def _net_cfg(*, battle_names=True, player_ja="タイカン", player_en="Taikan"):
-    """A cfg whose .translate carries battle_names + live names (SimpleNamespace, no disk)."""
+    """A cfg whose .translate carries battle_names + live names (SimpleNamespace, no disk).
+
+    Pins network_translate_all=False so these tests exercise the LEGACY whitelist path, where the
+    ``battle_names`` toggle is the gate for the name-ify pass. (Under the new translate_all default,
+    a battle template name-ifies via NAME_TAGS regardless of battle_names — covered in
+    test_network_text.py::test_translate_all_battle_template_is_name_ified.)
+    """
     tr = SimpleNamespace(
         player_name_ja=player_ja, player_name_en=player_en,
         sibling_name_ja="", sibling_name_en="",
         wrap_width=46, lines_per_page=0, battle_names=battle_names,
+        network_translate_all=False,
     )
     return SimpleNamespace(translate=tr)
 

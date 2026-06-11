@@ -408,6 +408,39 @@ NETWORK_NAME_CATEGORIES = NET_NAME_CATEGORIES
 # they are untouched.
 BATTLE_NAME_TAGS = frozenset({"<%sB_ACTOR>", "<%sB_TARGET>", "<%sB_TARGET2>"})
 
+# NOVEL (no upstream equivalent): NAME-bearing category substrings for the "translate the rest" model
+# (cfg.translate.network_translate_all). A category CONTAINING any of these carries a captured
+# Japanese argument that is a proper noun (player/NPC/monster/map name), which MUST route to the
+# instant name-ify pass (_translate_name_runs: player/sibling substitution -> cache/community/offline
+# romaji, NEVER MT — MT mangles names and would lag the combat hot path). Substrings (not exact
+# categories) so battle templates like "\sしびれくらげ\mしびれくらげ\e ... <%sB_TARGET> ..." are caught
+# by their embedded tag, and so the simple/map/casino name variants are all covered with one set.
+# Derived from BATTLE_NAME_TAGS + NET_NAME_CATEGORIES + the 15-min capture's name-bearing categories.
+# Each substring is verified against the real category lists in tests to NOT catch numeric/date/tag
+# noise (e.g. "_NAME>" matches <%sM_NAME>/<%sL_HIRYU_NAME> but not <%sB_VALUE>; "M_name>" is the
+# lowercase <%sM_name> not <%sW_MAP_NAME> which is caught by "W_MAP_NAME").
+NAME_TAGS = frozenset({
+    "B_ACTOR", "B_TARGET", "B_TARGET2",   # battle actor/target name slots
+    "<%sM_pc>", "<%sM_npc>", "<%sC_PC>",  # player/NPC character names
+    "M_name>", "_NAME>",                  # <%sM_name>, <%sM_NAME>/<%sL_SENDER_NAME>/<%sL_HIRYU_NAME>/...
+    "SENDER_NAME", "M_OWNER", "L_OWNER",  # mail sender, item/bazaar owner
+    "URINUSI", "HIRYU", "hiryu",          # bazaar seller, dragon mount name (<%sL_HIRYU>/<%sM_hiryu>)
+    "MONSTERNAME", "MERCENARY",           # monster + mercenary names
+    "CAS_gambler", "CAS_target",          # casino gambler/target names
+    "W_MAP_NAME",                         # map/zone name
+    "client_pc", "<%sM_monster>",         # client player + monster name surfaces
+})
+
+
+def _is_name_category(category: str) -> bool:
+    """True when ``category`` carries a proper-noun (name) argument -> the instant name-ify pass.
+
+    Substring match (see ``NAME_TAGS``) so battle templates that EMBED a name tag are caught, while
+    numeric/date/<@M_..>/version noise categories are not. Used only by the network_translate_all
+    ("translate the rest") routing; the legacy whitelist path is unaffected.
+    """
+    return any(t in category for t in NAME_TAGS)
+
 
 # The Story So Far panel is narrower than the dialogue box; its Japanese is pre-wrapped to ~16-20
 # full-width chars (≈40 half-width EN cols). 38 keeps EN safely inside the panel so no line clips.
@@ -443,7 +476,21 @@ def _mark_recap_cutoff(text: str) -> str:
 def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_page=None, sync=None):
     """Return ``fn(ja, category) -> str | None`` for the network_text return-hook surface.
 
-    Category-aware routing replicating upstream hooks/network_text.py's decision order, but with our
+    Two routings, selected by ``cfg.translate.network_translate_all``:
+
+    * TRUE (default) — the "translate the rest" model. The whitelist (NET_TRANSLATE_CATEGORIES) is
+      DROPPED as redundant: ``is_japanese(ja)`` already filters the ~93 noise categories
+      (numbers/dates/<@M_..> tags/English), name-bearing categories (``_is_name_category``) take the
+      instant name-ify pass, NET_IGNORE stays dropped, and EVERY other Japanese category flows to the
+      ASYNC text path. This is what stops the startup "Important Notice" body, community-board post
+      titles, items, and unknown prose from being silently left Japanese. The prose/recap text fns are
+      forced ``sync=False`` so a cache-miss enqueues + returns None WITHOUT lagging the game thread.
+    * FALSE — the EXACT legacy whitelist routing below (kept verbatim for opt-out / upstream parity).
+
+    Both share the name-ify pass (``_translate_name_runs``: player/sibling substitution first, then
+    cache/community/offline romaji — never MT, so names are instant on the combat hot path).
+
+    Legacy (FALSE) routing replicates upstream hooks/network_text.py's decision order, but with our
     translate paths. ``None`` means "pass through — leave the game's text untouched" (the
     ReturnHook.serve_once treats None / unchanged as no-write):
 
@@ -467,17 +514,50 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
     their static data is imported. Both paths reuse the existing build_*_translate_fn internals
     (no duplicated placeholder/community logic).
     """
+    translate_all = getattr(cfg.translate, "network_translate_all", True)
+    # CRITICAL — in the "translate the rest" model the DEFAULT path now sends arbitrary prose (the
+    # startup notice, board post titles, unknown categories) to MT. That MUST be ASYNC so a cache-miss
+    # returns None + enqueues WITHOUT blocking the game thread (build_translate_fn -> translate_
+    # conversation with sync=False: request() then None on miss). The name path needs no MT (instant),
+    # so only the text/recap fns are forced async here. The legacy whitelist path keeps the caller's
+    # ``sync`` (network_text's HookSpec sync=True) unchanged.
+    text_sync = False if translate_all else sync
+
     name_fn = build_name_translate_fn(cfg, translator)
     text_fn, _ = build_translate_fn(
-        cfg, translator, wrap_width=wrap_width, lines_per_page=lines_per_page, sync=sync
+        cfg, translator, wrap_width=wrap_width, lines_per_page=lines_per_page, sync=text_sync
     )
     # The "Story So Far" recap (<%sM_kaisetubun>) renders in a NARROWER, ~9-line, non-scrolling panel.
     # Wrap at KAISETUBUN_WRAP so long lines don't clip off the right edge (no <br>: the panel doesn't
     # paginate on it). A recap taller than the panel is then marked with a trailing "..." cutoff
     # indicator (see _mark_recap_cutoff) since we can't fit a wordy MT into the box.
     kaisetubun_fn, _ = build_translate_fn(
-        cfg, translator, wrap_width=KAISETUBUN_WRAP, lines_per_page=lines_per_page, sync=sync
+        cfg, translator, wrap_width=KAISETUBUN_WRAP, lines_per_page=lines_per_page, sync=text_sync
     )
+
+    def translate_all_fn(ja: str, category: str) -> str | None:
+        # "Translate the rest" routing: drop the redundant whitelist. is_japanese already filters the
+        # ~93 noise categories; name-bearing categories take the instant name-ify pass; NET_IGNORE
+        # stays dropped (high-volume JP chat/UI noise); every OTHER Japanese category flows to the
+        # ASYNC text path (so the startup notice, board titles, items, unknown prose translate instead
+        # of staying Japanese) rather than being silently dropped.
+        if not is_japanese(ja):
+            return None
+        if category.startswith("Version <%s_MVER"):
+            return None
+        if ja.endswith("自分"):
+            return ja[:-2] + "self"
+        if _is_name_category(category):
+            return _translate_name_runs(ja, translator)  # player-sub aware; instant (no MT)
+        if category in NET_IGNORE_CATEGORIES:
+            return None  # explicit high-volume JP noise (chat etc.)
+        if category == "<%sM_kaisetubun>":
+            recap = kaisetubun_fn(ja)  # narrower wrap so it doesn't clip the panel's right edge
+            return _mark_recap_cutoff(recap) if recap else recap
+        return text_fn(ja)  # DEFAULT: community -> cold-async MT (notice, board posts, items, prose)
+
+    if translate_all:
+        return translate_all_fn
 
     def translate_fn(ja: str, category: str) -> str | None:
         if not is_japanese(ja):

@@ -71,10 +71,15 @@ def _suffixer(name: str, suffix: str) -> StubProvider:
 
 
 def _cfg(**over):
-    """Minimal config stub: the dispatch builders read only cfg.translate.* attributes."""
+    """Minimal config stub: the dispatch builders read only cfg.translate.* attributes.
+
+    Pins network_translate_all=False so the network_text routing tests here exercise the LEGACY
+    whitelist path (sync-provider inline MT, non-whitelisted -> pass through). The new "translate the
+    rest" model (default True) is covered in tests/test_network_text.py.
+    """
     tr = SimpleNamespace(
         player_name_ja="", player_name_en="", sibling_name_ja="", sibling_name_en="",
-        wrap_width=46, lines_per_page=3, battle_names=True,
+        wrap_width=46, lines_per_page=3, battle_names=True, network_translate_all=False,
     )
     for k, v in over.items():
         setattr(tr, k, v)

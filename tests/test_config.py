@@ -309,6 +309,27 @@ def test_battle_names_defaults_and_round_trip(cfg_files):
     assert cfg_mod.load().translate.battle_names is True
 
 
+def test_network_translate_all_defaults_and_round_trip(cfg_files):
+    """FEATURE #12 "translate the rest" toggle (#network_translate_all): defaults True, survives
+    config set/save/load as a bool (coerced from the raw CLI string)."""
+    from dqxclarity.cli import config_set
+
+    # Default.
+    assert TranslateConfig().network_translate_all is True
+
+    # Toggle off via the CLI helper (value arrives as the raw string "false").
+    config_set("translate.network_translate_all", "false")
+    c = cfg_mod.load()
+    assert c.translate.network_translate_all is False
+    assert isinstance(c.translate.network_translate_all, bool)
+
+    # A full save/load round-trip preserves it, then toggling back on round-trips too.
+    cfg_mod.save(c)
+    assert cfg_mod.load().translate.network_translate_all is False
+    config_set("translate.network_translate_all", "true")
+    assert cfg_mod.load().translate.network_translate_all is True
+
+
 def test_auto_sync_defaults_and_round_trip(cfg_files):
     """`run`'s staleness-gated auto-refresh toggle + threshold (#19): correct defaults, and both
     survive config set/save/load with their declared types (bool / int)."""
