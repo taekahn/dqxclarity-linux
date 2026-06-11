@@ -695,8 +695,50 @@ def test_translate_all_version_noise_returns_none(tmp_path):
 
 
 def test_translate_all_jibun_suffix_becomes_self(tmp_path):
-    # The 自分 -> "self" nicety still fires (before the name/ignore checks) in the translate_all path.
+    # The 自分 -> "self" nicety still fires for a non-name, non-ignored category. (It now runs AFTER
+    # the name + NET_IGNORE checks so an ignored chat line ending in 自分 is dropped first.)
     c = TranslationCache(tmp_path / "ta_self.db")
     t = Translator(c)
     fn = build_network_translate_fn(_cfg(), t)
     assert fn("ホイミを 自分", "<%sM_00>") == "ホイミを self"
+
+
+def test_translate_all_quest_name_category_is_text_not_romaji(tmp_path):
+    # REGRESSION GUARD: <%sEV_QUEST_NAME> is a quest TITLE (prose, NET_GENERIC), NOT a name. The old
+    # broad "_NAME>" substring wrongly name-ified it -> romaji. It must take the async TEXT path: a
+    # cache miss returns None (a name-ify miss would instead return a romanized, non-None string).
+    assert _is_name_category("<%sEV_QUEST_NAME>") is False
+    c = TranslationCache(tmp_path / "ta_qn.db")
+    t = Translator(c)  # no provider: text-path miss -> None; name-path miss -> romaji (non-None)
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("ほのおの洞くつ", "<%sEV_QUEST_NAME>") is None
+
+
+def test_translate_all_map_name_is_name_ified(tmp_path):
+    # <%sW_MAP_NAME> was DROPPED by the legacy whitelist (it's in NET_IGNORE); under translate_all a
+    # zone name is a proper noun -> name-ify (community/romaji), reached BEFORE the NET_IGNORE drop.
+    c = TranslationCache(tmp_path / "ta_map.db")
+    c.store("ジュレット", "Julet", "community")
+    t = Translator(c)
+    assert _is_name_category("<%sW_MAP_NAME>") is True
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("ジュレット", "<%sW_MAP_NAME>") == "Julet"  # name-ified, NOT dropped
+
+
+def test_translate_all_chat_ending_in_jibun_is_still_dropped(tmp_path):
+    # ORDERING FIX: NET_IGNORE drops BEFORE the 自分 transform, so a chat line that happens to end in
+    # 自分 is dropped (None), NOT mangled into "...self".
+    c = TranslationCache(tmp_path / "ta_chatself.db")
+    t = Translator(c)
+    assert "<%sM_chat>" in NET_IGNORE_CATEGORIES
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("みんな がんばろう 自分", "<%sM_chat>") is None
+
+
+def test_translate_all_battle_self_target_jibun_becomes_self(tmp_path):
+    # A battle self-target arg "自分" in a NAME category resolves to "self" INSIDE the name-ify pass
+    # (not romanized), so the 自分 nicety survives the reorder for name categories too.
+    c = TranslationCache(tmp_path / "ta_selftgt.db")
+    t = Translator(c)
+    fn = build_network_translate_fn(_cfg(), t)
+    assert fn("自分", "<%sB_TARGET>") == "self"

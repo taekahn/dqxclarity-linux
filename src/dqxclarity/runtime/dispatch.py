@@ -54,6 +54,8 @@ def _translate_name_runs(text: str, translator) -> str | None:
     sja, sen = translator.sibling_name_ja, translator.sibling_name_en
 
     def resolve(run: str) -> str:
+        if run == "自分":  # "<actor> uses X on 自分" — a self-reference, not a name to romanize
+            return "self"
         if pja and run == pja:
             return pen or translator.translate_name(run)
         if sja and run == sja:
@@ -422,7 +424,8 @@ BATTLE_NAME_TAGS = frozenset({"<%sB_ACTOR>", "<%sB_TARGET>", "<%sB_TARGET2>"})
 NAME_TAGS = frozenset({
     "B_ACTOR", "B_TARGET", "B_TARGET2",   # battle actor/target name slots
     "<%sM_pc>", "<%sM_npc>", "<%sC_PC>",  # player/NPC character names
-    "M_name>", "_NAME>",                  # <%sM_name>, <%sM_NAME>/<%sL_SENDER_NAME>/<%sL_HIRYU_NAME>/...
+    "M_name>", "<%sM_NAME>", "PLAYER_NAME",  # <%sM_name>, <%sM_NAME>, <%sL_PLAYER_NAME> (NOT
+                                          # <%sEV_QUEST_NAME>: a quest TITLE/phrase -> text/MT, not romaji)
     "SENDER_NAME", "M_OWNER", "L_OWNER",  # mail sender, item/bazaar owner
     "URINUSI", "HIRYU", "hiryu",          # bazaar seller, dragon mount name (<%sL_HIRYU>/<%sM_hiryu>)
     "MONSTERNAME", "MERCENARY",           # monster + mercenary names
@@ -545,12 +548,12 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
             return None
         if category.startswith("Version <%s_MVER"):
             return None
-        if ja.endswith("自分"):
-            return ja[:-2] + "self"
         if _is_name_category(category):
-            return _translate_name_runs(ja, translator)  # player-sub aware; instant (no MT)
+            return _translate_name_runs(ja, translator)  # player-sub aware; instant (no MT); 自分->self inside
         if category in NET_IGNORE_CATEGORIES:
-            return None  # explicit high-volume JP noise (chat etc.)
+            return None  # explicit high-volume JP noise (chat etc.) — dropped BEFORE the 自分 transform
+        if ja.endswith("自分"):
+            return ja[:-2] + "self"  # self-reference in a non-name, non-ignored category
         if category == "<%sM_kaisetubun>":
             recap = kaisetubun_fn(ja)  # narrower wrap so it doesn't clip the panel's right edge
             return _mark_recap_cutoff(recap) if recap else recap
