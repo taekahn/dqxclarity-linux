@@ -945,6 +945,16 @@ def run(
         help="Capture ALL network_text traffic (category + text) to a JSON report instead of "
              "translating that surface — for tiering analysis. Low-lag pure-observe; dumps on exit.",
     ),
+    names: bool = typer.Option(
+        True, "--names/--no-names",
+        help="Run the polling NAME scanner alongside the hooks: live-translate concierge/party "
+             "(menu) / chat names by scanning memory (no hooking). On by default. This is SEPARATE "
+             "from the 'player' hook (which auto-detects YOUR + your sibling's name from the login "
+             "struct); both are complementary. --no-names disables the scanner.",
+    ),
+    names_interval: float = typer.Option(
+        1.0, "--names-interval", help="Seconds between name-scanner passes (with --names)."
+    ),
 ) -> None:
     """Live-translate all enabled text surfaces (dialogue, quests, …) in the running game.
 
@@ -970,6 +980,7 @@ def run(
         build_translate_fn,
         serve,
     )
+    from .runtime import names_loop
     from .runtime.playernames import build_apply_names
     from .translate.community import load_reward_items_local, load_suppressions_local
     from .translate.suppression import SuppressionIndex
@@ -1016,13 +1027,15 @@ def run(
     # normal whole-string path). The suppression index is built even when empty so the pre-pass
     # wiring stays uniform; reward_items defaults to {} so build_quest_translate_fn still produces a
     # valid router. When a needed snapshot is missing we print a one-line hint to run `sync`.
-    names = [h.strip() for h in hooks.split(",") if h.strip()]
+    # NB: `names` (the bool flag) is a SEPARATE thing from this hook-name LIST — keep the list under
+    # its own name so the flag stays readable below where we start the scanner.
+    hook_names = [h.strip() for h in hooks.split(",") if h.strip()]
     # Only a hook that declares reward fields (the quest hook) consumes the reward-item snapshot, so
     # skip that local read entirely when no such surface was requested. reward_field_indices is a
     # STATIC property of the HookSpec registry, so this is decided once here from the requested names
     # (no pid / no located hooks needed) and reused unchanged across every (re-)attach.
     wants_reward_items = any(
-        hookmod.HOOKS.get(n) is not None and hookmod.HOOKS[n].reward_field_indices for n in names
+        hookmod.HOOKS.get(n) is not None and hookmod.HOOKS[n].reward_field_indices for n in hook_names
     )
 
     suppressions = load_suppressions_local(_suppressions_path())
@@ -1160,9 +1173,9 @@ def run(
                 console.print(f"  [yellow]cleaned {len(restored)} orphaned hook(s) from a previous "
                               f"unclean exit[/]")
 
-            found = hookmod.locate(mem, names)
+            found = hookmod.locate(mem, hook_names)
             resolved = {f.spec.name for f in found}
-            for missing in [n for n in names if n not in resolved]:
+            for missing in [n for n in hook_names if n not in resolved]:
                 console.print(f"  [yellow]{missing}: function not found (signature drift?)[/]")
 
             # Install hooks for THIS mem and re-pair each freshly-installed (pid-bound) hook with its
@@ -1193,6 +1206,28 @@ def run(
                     # duration stops the WHOLE service (not just one attach): flipping stop WITHOUT
                     # game_gone makes the post-with check treat it like a user quit -> break + exit.
                     threading.Timer(duration, stop.set).start()
+                # --- NAME SCANNER (per-attach daemon thread) --------------------------------------- #
+                # The polling name scanner (concierge/party/chat names) runs ALONGSIDE the hooks for
+                # the life of THIS attach. It is hook-free — it scans+writes the per-attach `mem` —
+                # and reuses the ONE pid-independent translator built before the loop (never a second
+                # translator/cache). It keys off its OWN stop Event, NOT the shared `stop`: a
+                # game-gone sets game_gone but NOT `stop`, so a scanner on the shared `stop` would
+                # spin against the dead pid until the next attach. start_scanner gives it a private
+                # names_stop; we stop+join it in the finally below (covering serve() returning AND a
+                # KeyboardInterrupt) BEFORE the loop re-attaches or breaks, so it's fully wound down
+                # before the next attach builds a fresh mem. --no-names -> handle with no thread.
+                # Sentinel-safe coerce: a direct (non-CLI) cli.run(...) that omits these leaves typer's
+                # OptionInfo in place (the CLI resolves them, programmatic callers don't). OptionInfo
+                # is truthy but NOT a real number, so float() it would raise — fall back to the declared
+                # defaults instead. An un-coerced interval would otherwise blow up at stop.wait(interval).
+                names_on = names if isinstance(names, bool) else True
+                interval = float(names_interval) if isinstance(names_interval, (int, float)) else 1.0
+                if names_on:
+                    console.print("  name scanner on (concierge/party/chat)")
+                scanner = names_loop.start_scanner(
+                    mem, translator, enabled=names_on, interval=interval,
+                    on_write=lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"),
+                )
                 try:
                     total_served += serve(
                         mem, installed, stop=stop, game_gone=game_gone,
@@ -1203,6 +1238,11 @@ def run(
                 except KeyboardInterrupt:
                     user_quit = True
                     stop.set()
+                finally:
+                    # Stop+join the scanner BEFORE leaving the with-block (and thus before any
+                    # re-attach). A short join timeout keeps a stuck scan from wedging exit; it's a
+                    # daemon thread so even a missed join can't block process shutdown.
+                    scanner.stop_and_join(timeout=5.0)
             # hook_session's finally has already restored THIS session's hooks + journal.
             # Re-attach ONLY for a genuine game-gone. A SIGTERM/SIGHUP that lands in the SAME tick
             # the game vanished sets stop.signaled (via hook_session) even though game_gone is also

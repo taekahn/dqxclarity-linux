@@ -597,7 +597,9 @@ def _run_capture_installed(monkeypatch, *, hook_names, reward_items=None, suppre
     monkeypatch.setattr("dqxclarity.runtime.dispatch.serve", _fake_serve)
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config())
 
-    cli.run(hooks=",".join(hook_names), duration=0.0, patch=False)
+    # names=False: this is a reward-field hook test, not a name-scanner (#30) test — keep the
+    # polling scanner off so no real thread runs against the _Mem stub.
+    cli.run(hooks=",".join(hook_names), duration=0.0, patch=False, names=False)
     captured["reward_calls"] = reward_calls["n"]
     captured["read_paths"] = read_paths
     return captured

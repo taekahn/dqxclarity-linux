@@ -264,6 +264,27 @@ def run_env(monkeypatch):
         return action(stop, game_gone)
 
     monkeypatch.setattr(dispatch_mod, "serve", fake_serve)
+
+    # Name scanner: stub start_scanner so the supervisory-loop tests stay hermetic (no real thread,
+    # no real pattern_scan against the fake mem dict). Record start/stop calls + enabled flag so a
+    # dedicated test can assert the per-attach lifecycle. The real start_scanner/run logic is covered
+    # directly in test_run_names.py. Patch on the SOURCE module (run imports it locally).
+    import dqxclarity.runtime.names_loop as names_loop_mod
+    state["scanner_starts"] = []
+    state["scanner_stops"] = 0
+
+    class _FakeScanner:
+        def __init__(self, enabled):
+            self.enabled = enabled
+
+        def stop_and_join(self, timeout=None):
+            state["scanner_stops"] += 1
+
+    def fake_start_scanner(mem, translator, *, enabled, interval=1.0, on_write=None):
+        state["scanner_starts"].append({"mem": mem, "enabled": enabled, "interval": interval})
+        return _FakeScanner(enabled)
+
+    monkeypatch.setattr(names_loop_mod, "start_scanner", fake_start_scanner)
     # _build_fn calls build_translate_fn for a plain dialogue spec; stub it so the loop test stays
     # decoupled from translator internals (fn building itself is covered by test_translate.py).
     monkeypatch.setattr(dispatch_mod, "build_translate_fn",

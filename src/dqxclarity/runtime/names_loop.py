@@ -28,6 +28,63 @@ class LoopStats:
     samples: list[tuple[str, str]] = field(default_factory=list)
 
 
+@dataclass
+class ScannerHandle:
+    """Live handle to a background name-scanner thread (one per game attach).
+
+    ``run`` starts one of these inside each attach's ``hook_session`` block and ``.stop()``s it the
+    moment ``serve()`` returns — see ``start_scanner`` for the game-gone lifecycle reasoning. When
+    the scanner is disabled (``--no-names``) ``start_scanner`` returns a handle with ``thread=None``
+    so the caller's ``.stop()`` is an unconditional no-op (uniform call site, no None-guard).
+    """
+
+    stop: threading.Event
+    thread: threading.Thread | None = None
+
+    def stop_and_join(self, timeout: float | None = None) -> None:
+        """Set the per-attach stop and join the thread. Safe to call when disabled (no thread)."""
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=timeout)
+
+
+def start_scanner(
+    mem: LinuxProcessMemory,
+    translator: Translator,
+    *,
+    enabled: bool,
+    interval: float = 1.0,
+    on_write=None,
+) -> ScannerHandle:
+    """Start the polling name scanner as a DAEMON thread for ONE game attach, return a handle.
+
+    Why a per-attach thread with its OWN stop Event (not the supervisor's shared ``stop``):
+    ``serve()`` returns either on a user stop (which DOES flip the shared ``stop``) or on a
+    game-gone (which sets ``game_gone`` but NOT ``stop``). If the scanner keyed off the shared
+    ``stop``, a game-gone would leave it spinning ``pattern_scan`` against a dead pid forever.
+    Reads on a dead pid fail gracefully (empty result, no raise), so it wouldn't crash — but it
+    would never stop and would churn until the next attach. So each attach gets a fresh
+    ``names_stop`` Event; ``run`` sets it + joins the thread right after ``serve()`` returns,
+    BEFORE re-attaching builds a new ``mem``. The thread is bound to THIS attach's ``mem``, exactly
+    like the hooks.
+
+    When ``enabled`` is False (``--no-names``) no thread is started; the returned handle's
+    ``stop_and_join`` is a no-op so the call site stays uniform.
+    """
+    stop = threading.Event()
+    if not enabled:
+        return ScannerHandle(stop=stop, thread=None)
+    thread = threading.Thread(
+        target=run,
+        args=(mem, translator),
+        kwargs={"stop": stop, "interval": interval, "on_write": on_write},
+        name="name-scanner",
+        daemon=True,  # never block process exit on it; run() always stop+joins it explicitly anyway
+    )
+    thread.start()
+    return ScannerHandle(stop=stop, thread=thread)
+
+
 def run(
     mem: LinuxProcessMemory,
     translator: Translator,
