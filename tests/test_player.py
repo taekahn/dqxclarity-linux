@@ -563,3 +563,29 @@ def test_serve_mixes_player_hook_and_blocking_hook():
     # serve() surfaced both hooks' fields exactly once each.
     assert ("player", "タイカン") in lines
     assert ("dialogue", "こんにちは") in lines
+
+
+def test_build_apply_names_empty_read_does_not_clobber_known_name(tmp_path):
+    # A blank/garbage hook read must NEVER overwrite a known name (the mid-session "Squid" regression):
+    # an empty player_ja keeps the current pinned/detected value instead of clearing it.
+    cache = TranslationCache(tmp_path / "p_guard.db")
+    t = Translator(cache)
+    cfg = _cfg()
+    saves = []
+    apply_names = build_apply_names(cfg, t, save=saves.append)
+
+    apply_names("たろう", "はなこ", 0x01)        # a real detection sets the names
+    assert t.player_name_ja == "たろう"
+    pen, sen = t.player_name_en, t.sibling_name_en
+    saves.clear()
+
+    result = apply_names("", "", 0x00)           # a blank read must NOT clear them
+    assert t.player_name_ja == "たろう"          # kept
+    assert t.sibling_name_ja == "はなこ"
+    assert t.player_name_en == pen and t.sibling_name_en == sen
+    assert result is None and saves == []        # no change -> no spurious save
+
+    # A real player read with a still-blank sibling keeps the existing sibling.
+    apply_names("じろう", "", 0x00)
+    assert t.player_name_ja == "じろう"           # updated
+    assert t.sibling_name_ja == "はなこ"          # blank sibling preserved

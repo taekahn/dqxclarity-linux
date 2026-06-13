@@ -54,8 +54,15 @@ def build_apply_names(cfg, translator, *, save=None):
     save_fn = save if save is not None else config_mod.save
 
     def apply_names(player_ja: str, sibling_ja: str, relationship: int):
-        player_ja = player_ja or ""
-        sibling_ja = sibling_ja or ""
+        # A BLANK/garbage hook read must NEVER clobber a known name. The player hook can fire
+        # mid-session (e.g. just after a re-attach, or while the login struct is being re-initialized
+        # on a zone load) and hand us an empty player_ja; without this guard the idempotency check
+        # below sees "" != "タイカン" as a change and overwrites the good name with empty, so every
+        # name path then falls back to the cache and the player's own name regresses to a colliding
+        # monster ("Squid"). So an EMPTY detection keeps the current (pinned/detected) value; only a
+        # REAL (non-empty) read updates a field.
+        player_ja = player_ja or translator.player_name_ja or ""
+        sibling_ja = sibling_ja or translator.sibling_name_ja or ""
 
         player_en = _resolve_en(player_ja)
         sibling_en = _resolve_en(sibling_ja)
