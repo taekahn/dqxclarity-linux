@@ -518,32 +518,40 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
     (no duplicated placeholder/community logic).
     """
     translate_all = getattr(cfg.translate, "network_translate_all", True)
-    # CRITICAL — in the "translate the rest" model the DEFAULT path now sends arbitrary prose (the
-    # startup notice, board post titles, unknown categories) to MT. That MUST be ASYNC so a cache-miss
-    # returns None + enqueues WITHOUT blocking the game thread (build_translate_fn -> translate_
-    # conversation with sync=False: request() then None on miss). The name path needs no MT (instant),
-    # so only the text/recap fns are forced async here. The legacy whitelist path keeps the caller's
-    # ``sync`` (network_text's HookSpec sync=True) unchanged.
-    text_sync = False if translate_all else sync
 
     name_fn = build_name_translate_fn(cfg, translator)
+    # HYBRID (fixes the live "more Japanese" backslide): the WHITELISTED prose (the known-good 28) +
+    # the recap stay SYNC/immediate exactly as the legacy path (text_fn uses the caller's ``sync`` =
+    # network_text's HookSpec sync=True), so they never flash Japanese and there's no regression. In
+    # the "translate the rest" model ONLY the EXTRA non-whitelisted prose (startup notice, board posts,
+    # unknown categories) goes through text_fn_async (sync=False: a cache miss enqueues + returns None
+    # without blocking). That makes translate-the-rest purely ADDITIVE — it can't regress the
+    # previously-instant whitelisted text, and it bounds the background worker to the NEW content only
+    # (no whole-surface async flood of the single Google worker).
     text_fn, _ = build_translate_fn(
-        cfg, translator, wrap_width=wrap_width, lines_per_page=lines_per_page, sync=text_sync
+        cfg, translator, wrap_width=wrap_width, lines_per_page=lines_per_page, sync=sync
     )
     # The "Story So Far" recap (<%sM_kaisetubun>) renders in a NARROWER, ~9-line, non-scrolling panel.
     # Wrap at KAISETUBUN_WRAP so long lines don't clip off the right edge (no <br>: the panel doesn't
     # paginate on it). A recap taller than the panel is then marked with a trailing "..." cutoff
     # indicator (see _mark_recap_cutoff) since we can't fit a wordy MT into the box.
     kaisetubun_fn, _ = build_translate_fn(
-        cfg, translator, wrap_width=KAISETUBUN_WRAP, lines_per_page=lines_per_page, sync=text_sync
+        cfg, translator, wrap_width=KAISETUBUN_WRAP, lines_per_page=lines_per_page, sync=sync
     )
+    # The non-whitelisted "rest" (only built in translate_all mode) — cold-async so a cache miss never
+    # blocks the game thread; it enqueues a background request and fills on a later view.
+    text_fn_async = None
+    if translate_all:
+        text_fn_async, _ = build_translate_fn(
+            cfg, translator, wrap_width=wrap_width, lines_per_page=lines_per_page, sync=False
+        )
 
     def translate_all_fn(ja: str, category: str) -> str | None:
-        # "Translate the rest" routing: drop the redundant whitelist. is_japanese already filters the
-        # ~93 noise categories; name-bearing categories take the instant name-ify pass; NET_IGNORE
-        # stays dropped (high-volume JP chat/UI noise); every OTHER Japanese category flows to the
-        # ASYNC text path (so the startup notice, board titles, items, unknown prose translate instead
-        # of staying Japanese) rather than being silently dropped.
+        # "Translate the rest" (HYBRID) routing: is_japanese filters the ~93 noise categories;
+        # name-bearing categories take the instant name-ify pass; NET_IGNORE stays dropped; the
+        # WHITELISTED prose + recap stay SYNC/immediate (no regression vs the legacy path); and every
+        # OTHER Japanese category (notice, board titles, items, unknown prose) flows to the ASYNC text
+        # path — additive, so it can't regress the whitelist and only the NEW content hits MT.
         if not is_japanese(ja):
             return None
         if category.startswith("Version <%s_MVER"):
@@ -557,7 +565,9 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         if category == "<%sM_kaisetubun>":
             recap = kaisetubun_fn(ja)  # narrower wrap so it doesn't clip the panel's right edge
             return _mark_recap_cutoff(recap) if recap else recap
-        return text_fn(ja)  # DEFAULT: community -> cold-async MT (notice, board posts, items, prose)
+        if category in NET_TRANSLATE_CATEGORIES:
+            return text_fn(ja)        # whitelisted prose -> SYNC/immediate (identical to the legacy path)
+        return text_fn_async(ja)      # the REST (notice/board/unknown) -> cold-async; fills on a later view
 
     if translate_all:
         return translate_all_fn

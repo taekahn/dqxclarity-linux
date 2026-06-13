@@ -742,3 +742,37 @@ def test_translate_all_battle_self_target_jibun_becomes_self(tmp_path):
     t = Translator(c)
     fn = build_network_translate_fn(_cfg(), t)
     assert fn("自分", "<%sB_TARGET>") == "self"
+
+
+def test_translate_all_hybrid_whitelist_sync_rest_async(tmp_path):
+    # THE HYBRID FIX (for the live "more Japanese" backslide): a WHITELISTED prose category stays
+    # SYNC — a cache miss is translated INLINE by the sync provider (immediate, no JA-flash), exactly
+    # like the legacy path. A NON-whitelisted category goes ASYNC — the sync provider is NOT called
+    # inline (enqueued, fills later). So translate-the-rest never makes the known-good whitelist async.
+    class RecordProvider:
+        name = "googletranslatefree"
+
+        def __init__(self):
+            self.calls = []
+
+        def available(self):
+            return True
+
+        def translate(self, texts):
+            self.calls += list(texts)
+            return ["EN-" + str(i) for i, _ in enumerate(texts)]
+
+    c = TranslationCache(tmp_path / "ta_hybrid.db")
+    p = RecordProvider()
+    t = Translator(c, sync_provider=p)
+    fn = build_network_translate_fn(_cfg(), t, sync=True)  # network_text HookSpec sync=True
+    # whitelisted generic (<%sM_header> is in NET_TRANSLATE, not a name) -> SYNC: inline MT on miss.
+    assert "<%sM_header>" in NET_TRANSLATE_CATEGORIES and not _is_name_category("<%sM_header>")
+    out_wl = fn("だいじなみだし。", "<%sM_header>")
+    assert out_wl is not None and p.calls  # translated INLINE by the sync provider (immediate)
+    # non-whitelisted prose -> ASYNC: miss returns None and does NOT call the sync provider inline.
+    p.calls.clear()
+    nonwl = "<%sお知らせ>"
+    assert nonwl not in NET_TRANSLATE_CATEGORIES and not _is_name_category(nonwl)
+    assert fn("べつのおしらせ。", nonwl) is None  # async miss -> None
+    assert p.calls == []                          # NOT inline (enqueued instead) -> no game-thread lag
