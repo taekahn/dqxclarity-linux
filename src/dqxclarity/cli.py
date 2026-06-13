@@ -1204,19 +1204,20 @@ def run(
                 console.print(f"  [yellow]cleaned {len(restored)} orphaned hook(s) from a previous "
                               f"unclean exit[/]")
 
-            # Locate the requested hook functions. On a FRESH attach the game may still be loading,
-            # so a function's code page isn't resolvable yet — the early-attach TOTAL miss (#31) that
-            # used to abort `run` ("no hooks installed") and, worse, miss login-time traffic (the
-            # notice). Instead of giving up, retry locating while NOTHING resolves (up to a bounded
-            # window) so we hook the instant the code settles — the earliest possible attach. We
-            # proceed as soon as ANY hook resolves (unchanged for a normal multi-hook run, which finds
-            # at least one immediately); per-hook stragglers are still just reported below.
+            # Locate the requested hook functions, WAITING until the WHOLE set resolves before we
+            # install anything (#31). On a cold launch the service attaches the instant DQXGame.exe
+            # appears — but the game is still decrypting/relocating its code, so only SOME hook
+            # functions are at their final bytes yet. Installing a detour into a not-yet-settled
+            # function corrupts it: a partial-hook attach (e.g. 3/7) crashed the game with an access
+            # violation EXECUTING at ~null (a clobbered code redirect). Resolving ALL requested hooks
+            # is our "game fully loaded" signal — only then is it safe to install. We poll until the
+            # set is complete or the window elapses (genuine signature drift -> proceed with whatever
+            # resolved + report the missing below). Deadline is checked BEFORE is_alive() so a zero
+            # window (tests) skips the probe entirely (the mem stub has no is_alive()).
             import time as _t
             _deadline = _t.monotonic() + HOOK_LOCATE_RETRY_SECS
             found = hookmod.locate(mem, hook_names)
-            # Deadline checked BEFORE is_alive() so a zero window skips the probe entirely (keeps the
-            # no-hooks unit test, whose mem stub has no is_alive, fast + hermetic).
-            while not found and _t.monotonic() < _deadline and mem.is_alive():
+            while len(found) < len(hook_names) and _t.monotonic() < _deadline and mem.is_alive():
                 _t.sleep(0.4)
                 found = hookmod.locate(mem, hook_names)
             resolved = {f.spec.name for f in found}

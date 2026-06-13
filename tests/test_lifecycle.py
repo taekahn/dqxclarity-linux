@@ -317,6 +317,9 @@ def run_env(monkeypatch):
 
     import dqxclarity.process.hooks as hookmod
     monkeypatch.setattr(hookmod, "locate", lambda mem, names: [_FakeFound()])
+    # Zero the early-attach locate-retry window so the supervisory loop never waits in tests,
+    # regardless of how many hooks a test requests vs. how many the locate stub returns (#31).
+    monkeypatch.setattr(cli, "HOOK_LOCATE_RETRY_SECS", 0.0)
 
     def fake_install(mem, found):
         state["installs"] += 1
