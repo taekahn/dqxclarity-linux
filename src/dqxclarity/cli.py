@@ -955,6 +955,13 @@ def run(
     names_interval: float = typer.Option(
         1.0, "--names-interval", help="Seconds between name-scanner passes (with --names)."
     ),
+    notice: bool = typer.Option(
+        True, "--notice/--no-notice",
+        help="Run the polling NOTICE scanner alongside the hooks: live-translate the startup "
+             "'Important Notice' announcement body by scanning memory (no hooking). On by default. "
+             "The notice is a STATIC memory buffer that never flows through any code hook, so it "
+             "needs a scanner like the names. --no-notice disables it.",
+    ),
 ) -> None:
     """Live-translate all enabled text surfaces (dialogue, quests, …) in the running game.
 
@@ -980,7 +987,7 @@ def run(
         build_translate_fn,
         serve,
     )
-    from .runtime import names_loop
+    from .runtime import names_loop, notice_loop
     from .runtime.playernames import build_apply_names
     from .translate.community import load_reward_items_local, load_suppressions_local
     from .translate.suppression import SuppressionIndex
@@ -1134,6 +1141,21 @@ def run(
             "quest-reward cleanup.[/]"
         )
 
+    # --- NOTICE SCANNER prose fn (PID-INDEPENDENT, built ONCE) --------------------------------- #
+    # The startup "Important Notice" body is a STATIC memory buffer that never flows through any code
+    # hook (confirmed absent from a full network_text capture), so it can't be a HookSpec — it's
+    # handled by the notice scanner instead (notice_loop). It rides the SAME prose pipeline as
+    # dialogue: build_translate_fn (community-first, then MT, placeholder-safe). We build the fn ONCE
+    # here (pid-independent, like the translator) and reuse it for every attach. sync=True so the
+    # notice translates immediately on the login screen (it's one-shot per appearance, not a hot
+    # path); the BAD STRING suppression pre-pass is included for parity with the dialogue path.
+    notice_translate_fn, _ = build_translate_fn(
+        cfg, translator, wrap_width=notice_loop.NOTICE_WRAP_WIDTH,
+        lines_per_page=0,  # no <br> pagination: the notice carries its own literal <PAGE> breaks
+        sync=True,  # one-shot off the hot path -> block on MT so it fills on the first tick it's seen
+        suppression=suppression_index,
+    )
+
     # --- SUPERVISORY RE-ATTACH LOOP ------------------------------------------------------------ #
     # Each iteration attaches to the CURRENT game pid for the lifetime of one session, then:
     #   * game closed/crashed mid-session -> serve() returns with game_gone set; we re-attach when
@@ -1228,6 +1250,20 @@ def run(
                     mem, translator, enabled=names_on, interval=interval,
                     on_write=lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"),
                 )
+                # --- NOTICE SCANNER (per-attach daemon thread) ------------------------------------- #
+                # Same per-attach, private-stop lifecycle as the name scanner (see above): the startup
+                # "Important Notice" body is a STATIC buffer with no hook, so we scan+translate+write
+                # it in place. It reuses the ONE pid-independent notice_translate_fn built before the
+                # loop. The scanner is idempotent (it only acts while the buffer reads Japanese), so it
+                # translates once per appearance and idles otherwise. --no-notice -> handle, no thread.
+                # Sentinel-safe coerce of the typer flag for direct (non-CLI) cli.run callers.
+                notice_on = notice if isinstance(notice, bool) else True
+                if notice_on:
+                    console.print("  notice scanner on (startup Important Notice)")
+                notice_scanner = notice_loop.start_notice_scanner(
+                    mem, notice_translate_fn, enabled=notice_on, interval=interval,
+                    on_write=lambda: console.print("  [dim]notice[/] [green]translated[/]"),
+                )
                 try:
                     total_served += serve(
                         mem, installed, stop=stop, game_gone=game_gone,
@@ -1239,10 +1275,11 @@ def run(
                     user_quit = True
                     stop.set()
                 finally:
-                    # Stop+join the scanner BEFORE leaving the with-block (and thus before any
-                    # re-attach). A short join timeout keeps a stuck scan from wedging exit; it's a
-                    # daemon thread so even a missed join can't block process shutdown.
+                    # Stop+join BOTH scanners BEFORE leaving the with-block (and thus before any
+                    # re-attach). A short join timeout keeps a stuck scan from wedging exit; they're
+                    # daemon threads so even a missed join can't block process shutdown.
                     scanner.stop_and_join(timeout=5.0)
+                    notice_scanner.stop_and_join(timeout=5.0)
             # hook_session's finally has already restored THIS session's hooks + journal.
             # Re-attach ONLY for a genuine game-gone. A SIGTERM/SIGHUP that lands in the SAME tick
             # the game vanished sets stop.signaled (via hook_session) even though game_gone is also

@@ -43,8 +43,10 @@ class TranslateConfig:
     # True (default), build_network_translate_fn DROPS the redundant whitelist (NET_TRANSLATE_
     # CATEGORIES): noise categories are already filtered by is_japanese(ja), name-bearing categories
     # route to the instant name-ify pass, NET_IGNORE stays dropped, and every OTHER Japanese category
-    # (the startup "Important Notice", community-board post titles, items, unknown prose) flows to the
-    # ASYNC text path instead of being silently left Japanese. Set False for the exact prior whitelist
+    # (community-board post titles, items, unknown prose) flows to the ASYNC text path instead of
+    # being silently left Japanese. (The startup "Important Notice" is NOT a network_text category —
+    # it's a static memory buffer handled by the notice scanner, runtime/notice_loop.py.) Set False
+    # for the exact prior whitelist
     # behaviour (only the 28 NET_TRANSLATE_CATEGORIES are ever touched).
     network_translate_all: bool = True
     # Auto-refresh the translation DB on `run` startup when it's STALE (or never synced). The check

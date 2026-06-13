@@ -486,8 +486,8 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
       ``text_fn_async`` (``sync=False`` → a cache-miss enqueues + returns None WITHOUT lagging the game
       thread). The whitelist (NET_TRANSLATE_CATEGORIES) + the ``<%sM_kaisetubun>`` recap keep their
       KNOWN-GOOD SYNC routing — they translate immediately as before (no regression); only the EXTRA,
-      non-whitelisted Japanese prose (startup "Important Notice" body, community-board post titles,
-      items, unknown strings) is ADDITIVE via ``text_fn_async``, filling on a later view instead of
+      non-whitelisted Japanese prose (community-board post titles, items, unknown strings) is
+      ADDITIVE via ``text_fn_async``, filling on a later view instead of
       flashing Japanese-first AND backlogging the single background worker (the bug the earlier
       all-async build caused). ``is_japanese(ja)`` still filters the ~93 noise categories and
       name-bearing categories (``_is_name_category``) still take the instant name-ify pass; NET_IGNORE
@@ -527,7 +527,7 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
     # HYBRID (fixes the live "more Japanese" backslide): the WHITELISTED prose (the known-good 28) +
     # the recap stay SYNC/immediate exactly as the legacy path (text_fn uses the caller's ``sync`` =
     # network_text's HookSpec sync=True), so they never flash Japanese and there's no regression. In
-    # the "translate the rest" model ONLY the EXTRA non-whitelisted prose (startup notice, board posts,
+    # the "translate the rest" model ONLY the EXTRA non-whitelisted prose (board posts,
     # unknown categories) goes through text_fn_async (sync=False: a cache miss enqueues + returns None
     # without blocking). That makes translate-the-rest purely ADDITIVE — it can't regress the
     # previously-instant whitelisted text, and it bounds the background worker to the NEW content only
@@ -554,8 +554,10 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         # "Translate the rest" (HYBRID) routing: is_japanese filters the ~93 noise categories;
         # name-bearing categories take the instant name-ify pass; NET_IGNORE stays dropped; the
         # WHITELISTED prose + recap stay SYNC/immediate (no regression vs the legacy path); and every
-        # OTHER Japanese category (notice, board titles, items, unknown prose) flows to the ASYNC text
-        # path — additive, so it can't regress the whitelist and only the NEW content hits MT.
+        # OTHER Japanese category (board titles, items, unknown prose) flows to the ASYNC text path —
+        # additive, so it can't regress the whitelist and only the NEW content hits MT.
+        # (The startup "Important Notice" is NOT a network_text category — it never flows through this
+        # hook; it's a static memory buffer handled by runtime/notice_loop.py's scanner.)
         if not is_japanese(ja):
             return None
         if category.startswith("Version <%s_MVER"):
@@ -573,7 +575,7 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
             return _mark_recap_cutoff(recap) if recap else recap
         if category in NET_TRANSLATE_CATEGORIES:
             return text_fn(ja)        # whitelisted prose -> SYNC/immediate (identical to the legacy path)
-        return text_fn_async(ja)      # the REST (notice/board/unknown) -> cold-async; fills on a later view
+        return text_fn_async(ja)      # the REST (board/unknown prose) -> cold-async; fills on a later view
 
     if translate_all:
         return translate_all_fn

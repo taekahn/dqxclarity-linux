@@ -512,9 +512,10 @@ def _run_capture_installed(monkeypatch, *, hook_names, suppressions):
     monkeypatch.setattr("dqxclarity.runtime.dispatch.serve", _fake_serve)
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config())
 
-    # names=False: this test only covers the suppression pre-pass on the hook surfaces, not the
-    # polling name scanner (#30) — disable it so no real scanner thread spins against the _Mem stub.
-    cli.run(hooks=",".join(hook_names), duration=0.0, patch=False, names=False)
+    # names/notice=False: this test only covers the suppression pre-pass on the hook surfaces, not the
+    # polling name scanner (#30) or notice scanner (#27) — disable both so no real scanner thread spins
+    # against the _Mem stub.
+    cli.run(hooks=",".join(hook_names), duration=0.0, patch=False, names=False, notice=False)
     # run() must read the suppressions snapshot from the config-data dir.
     assert read_paths.get("suppressions") == cli._suppressions_path()
     return captured["installed"]
@@ -597,9 +598,9 @@ def test_cli_run_missing_suppression_snapshot_degrades(monkeypatch):
     )
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config())
 
-    # Must NOT raise despite the missing snapshot. names=False keeps the polling scanner (#30) out
-    # of this hook-installation test (no real thread against the _Mem stub).
-    cli.run(hooks="dialogue", duration=0.0, patch=False, names=False)
+    # Must NOT raise despite the missing snapshot. names/notice=False keeps the polling scanners
+    # (#30 names, #27 notice) out of this hook-installation test (no real thread against the _Mem stub).
+    cli.run(hooks="dialogue", duration=0.0, patch=False, names=False, notice=False)
     fn = {name: fn for name, _h, fn in captured["installed"]}["dialogue"]
     # Pre-pass skipped (empty index): a non-Japanese string still short-circuits to None.
     assert fn("Already English") is None

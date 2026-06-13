@@ -285,6 +285,27 @@ def run_env(monkeypatch):
         return _FakeScanner(enabled)
 
     monkeypatch.setattr(names_loop_mod, "start_scanner", fake_start_scanner)
+
+    # Notice scanner: stub start_notice_scanner the same way (the startup "Important Notice" is a
+    # static memory buffer with no hook, scanned in its own per-attach daemon thread). Record start/
+    # stop calls + enabled flag so a dedicated test can assert the per-attach lifecycle. The real
+    # start_notice_scanner/run logic is covered directly in test_notice.py.
+    import dqxclarity.runtime.notice_loop as notice_loop_mod
+    state["notice_starts"] = []
+    state["notice_stops"] = 0
+
+    class _FakeNoticeScanner:
+        def __init__(self, enabled):
+            self.enabled = enabled
+
+        def stop_and_join(self, timeout=None):
+            state["notice_stops"] += 1
+
+    def fake_start_notice_scanner(mem, translate_fn, *, enabled, interval=1.0, on_write=None):
+        state["notice_starts"].append({"mem": mem, "enabled": enabled, "interval": interval})
+        return _FakeNoticeScanner(enabled)
+
+    monkeypatch.setattr(notice_loop_mod, "start_notice_scanner", fake_start_notice_scanner)
     # _build_fn calls build_translate_fn for a plain dialogue spec; stub it so the loop test stays
     # decoupled from translator internals (fn building itself is covered by test_translate.py).
     monkeypatch.setattr(dispatch_mod, "build_translate_fn",
