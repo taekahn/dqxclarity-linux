@@ -171,3 +171,78 @@ def test_run_uses_names_interval(run_env):  # noqa: F811
     cli.run(hooks="dialogue", duration=0.0, patch=True, names=True, names_interval=2.5)
 
     assert st["scanner_starts"][0]["interval"] == 2.5
+
+
+# =============================================================================================== #
+# names_loop.run — player/sibling collision (the "Squid" bug)                                     #
+# =============================================================================================== #
+
+
+class _OneShotStop:
+    """A stop Event stand-in that lets names_loop.run execute EXACTLY one scan iteration."""
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    def is_set(self) -> bool:
+        self._n += 1
+        return self._n > 1  # False on the loop's first check, True thereafter
+
+    def wait(self, _timeout) -> None:
+        pass
+
+
+class _CollisionMem:
+    """Minimal mem: every name-pattern scan yields one match whose name is the player's JA name."""
+
+    def __init__(self, ja: str) -> None:
+        self._ja = ja
+        self.writes: list[str] = []
+
+    def pattern_scan(self, pattern, *, data_only=True, limit=200):
+        return [0x1000]
+
+    def read_cstring(self, addr, n=64):
+        return self._ja
+
+    def write_cstring(self, addr, text, *, max_bytes):
+        self.writes.append(text)
+        return True
+
+
+class _CollisionTranslator:
+    """player タイカン collides with a cached monster タイカン -> 'Squid'; the pin must win."""
+
+    def __init__(self) -> None:
+        self.player_name_ja = "タイカン"
+        self.player_name_en = "Taikan"
+        self.sibling_name_ja = "きみこ"
+        self.sibling_name_en = "Kimiko"
+
+    def translate_name(self, ja: str) -> str:
+        return "Squid" if ja == "タイカン" else "romaji(" + ja + ")"
+
+
+def test_scanner_player_name_beats_cache_collision():
+    # The player's own name in the party buffer must resolve to the pinned EN name, NOT the cached
+    # monster collision. Every write the scanner makes for タイカン must be 'Taikan', never 'Squid'.
+    mem = _CollisionMem("タイカン")
+    names_loop.run(mem, _CollisionTranslator(), stop=_OneShotStop(), interval=0)
+    assert mem.writes, "scanner should have written at least once"
+    assert all("Taikan" in w for w in mem.writes)
+    assert all("Squid" not in w for w in mem.writes)
+
+
+def test_scanner_sibling_name_beats_cache_collision():
+    mem = _CollisionMem("きみこ")
+    names_loop.run(mem, _CollisionTranslator(), stop=_OneShotStop(), interval=0)
+    assert mem.writes
+    assert all("Kimiko" in w for w in mem.writes)
+
+
+def test_scanner_non_player_name_uses_translate_name():
+    # A normal monster/NPC name (no player/sibling collision) still goes through translate_name.
+    mem = _CollisionMem("スライム")
+    names_loop.run(mem, _CollisionTranslator(), stop=_OneShotStop(), interval=0)
+    assert mem.writes
+    assert all("romaji(スライム)" in w for w in mem.writes)

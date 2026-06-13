@@ -104,7 +104,17 @@ def run(
                 if not ja or not _is_japanese(ja):
                     continue
                 stats.seen += 1
-                en = translator.translate_name(ja)
+                # Player/sibling substitution FIRST — the player's OWN name in the party buffer
+                # (e.g. タイカン) collides with a cached monster name ("Squid"), so an exact match on
+                # the live player/sibling JA name must beat the cache lookup. Same precedence as
+                # dispatch._translate_name_runs.resolve(); without it the player's party nameplate
+                # renders as the colliding monster name.
+                if ja == translator.player_name_ja and translator.player_name_en:
+                    en = translator.player_name_en
+                elif ja == translator.sibling_name_ja and translator.sibling_name_en:
+                    en = translator.sibling_name_en
+                else:
+                    en = translator.translate_name(ja)
                 if not en or en == ja:
                     continue
                 # Re-read guard against the value changing between scan and write.
