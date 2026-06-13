@@ -634,11 +634,15 @@ def _set_chat_length(mem, text_addr: int, length: int) -> bool:
     Only the main (largest) buffer has an edit-control; the smaller render copies don't, so a "not
     found" here is normal for those — the caller sets length only where it can.
     """
+    import re
     import struct
 
     from .process import signatures as sig
 
-    refs = mem.pattern_scan(struct.pack("<I", text_addr), data_only=True, return_multiple=True) or []
+    # pattern_scan compiles its argument as a byte-regex, so a LITERAL search must be re.escape'd —
+    # a packed address can contain regex metacharacters (e.g. 0x5B '[') that would otherwise raise.
+    needle = re.escape(struct.pack("<I", text_addr))
+    refs = mem.pattern_scan(needle, data_only=True, return_multiple=True) or []
     set_any = False
     for r in refs:
         try:
@@ -683,6 +687,8 @@ def _inject_chat_text(mem, text: str, sentinel: str) -> tuple[int, list[tuple[in
     list of ``(capacity, needed)`` pairs for too-small copies, ``max_cap`` is the largest capacity
     WRITTEN (0 if none), and ``length_set_count`` is how many buffers got their send-length set.
     """
+    import re
+
     from .process import signatures as sig
 
     utf8 = text.encode("utf-8")
@@ -690,7 +696,10 @@ def _inject_chat_text(mem, text: str, sentinel: str) -> tuple[int, list[tuple[in
     needed = text_len + 1  # text + NUL
     sentinel_bytes = sentinel.encode("ascii")
 
-    hits = mem.pattern_scan(sig.CHAT_STRING_HEADER + sentinel_bytes, return_multiple=True) or []
+    # re.escape the LITERAL header+sentinel: pattern_scan treats its arg as a byte-regex, so a sentinel
+    # containing a regex metacharacter (".", "[", "*", …) would otherwise mis-scan or raise.
+    needle = re.escape(sig.CHAT_STRING_HEADER + sentinel_bytes)
+    hits = mem.pattern_scan(needle, return_multiple=True) or []
 
     written = 0
     skipped: list[tuple[int, int]] = []

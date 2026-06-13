@@ -273,3 +273,11 @@ def test_inject_no_edit_control_reports_length_unset():
     mem = FakeChatMem([(192, "qzx")])  # no edit_control_for
     written, skipped, max_cap, length_set = cli._inject_chat_text(mem, "テスト", "qzx")
     assert written == 1 and length_set == 0
+
+
+def test_inject_sentinel_with_regex_metachars_is_escaped():
+    # A sentinel containing regex metacharacters ('.', '[') must be matched LITERALLY, not as a regex.
+    mem = FakeChatMem([(192, "a.[b")])
+    written, skipped, max_cap, length_set = cli._inject_chat_text(mem, "ありがとう", "a.[b")
+    assert written == 1
+    assert mem.read_text(0) == "ありがとう"
