@@ -956,11 +956,14 @@ def run(
         1.0, "--names-interval", help="Seconds between name-scanner passes (with --names)."
     ),
     notice: bool = typer.Option(
-        True, "--notice/--no-notice",
-        help="Run the polling NOTICE scanner alongside the hooks: live-translate the startup "
-             "'Important Notice' announcement body by scanning memory (no hooking). On by default. "
-             "The notice is a STATIC memory buffer that never flows through any code hook, so it "
-             "needs a scanner like the names. --no-notice disables it.",
+        False, "--notice/--no-notice",
+        help="EXPERIMENTAL / OFF by default (see #27): run the polling NOTICE scanner that tries to "
+             "live-translate the startup 'Important Notice' body by writing English into its memory "
+             "buffer. DISABLED because the current anchor is wrong: the notice is rendered from a "
+             "VOLATILE, per-page buffer (only the displayed page is resident; the page-2 anchor it "
+             "keys on isn't present on page 1) that the game continuously re-populates, so the writes "
+             "don't reach the rendered copy AND poking those buffers can crash the game. Needs a "
+             "code-hook redo before re-enabling. --notice opts in at your own risk.",
     ),
 ) -> None:
     """Live-translate all enabled text surfaces (dialogue, quests, …) in the running game.
@@ -1257,7 +1260,7 @@ def run(
                 # loop. The scanner is idempotent (it only acts while the buffer reads Japanese), so it
                 # translates once per appearance and idles otherwise. --no-notice -> handle, no thread.
                 # Sentinel-safe coerce of the typer flag for direct (non-CLI) cli.run callers.
-                notice_on = notice if isinstance(notice, bool) else True
+                notice_on = notice if isinstance(notice, bool) else False  # #27: OFF by default
                 if notice_on:
                     console.print("  notice scanner on (startup Important Notice)")
                 notice_scanner = notice_loop.start_notice_scanner(

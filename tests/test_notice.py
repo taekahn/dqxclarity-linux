@@ -333,16 +333,19 @@ def test_start_notice_scanner_disabled_starts_no_thread():
 # =============================================================================================== #
 
 
-def test_run_notice_defaults_true_and_starts_scanner(run_env):  # noqa: F811
+def test_run_notice_defaults_false_and_scanner_disabled(run_env):  # noqa: F811
+    # #27: the notice scanner is OFF by default (its anchor is wrong + poking the volatile notice
+    # buffer can crash the game). The handle is still constructed+stop_and_join'd per attach (uniform
+    # lifecycle), but with enabled=False it spawns no thread / does no writes.
     st = run_env["state"]
     st["serve_script"] = [_user_quit]
 
     cli.run(hooks="dialogue", duration=0.0, patch=True)
 
-    assert len(st["notice_starts"]) == 1               # one notice scanner per attach
-    assert st["notice_starts"][0]["enabled"] is True   # default ON
+    assert len(st["notice_starts"]) == 1               # handle built per attach (no-op when disabled)
+    assert st["notice_starts"][0]["enabled"] is False  # default OFF
     assert st["notice_starts"][0]["mem"] == {"pid": 100}
-    assert st["notice_stops"] == 1                      # stopped+joined once
+    assert st["notice_stops"] == 1                      # stop_and_join'd once (no-op handle)
 
 
 def test_run_no_notice_disables_scanner(run_env):  # noqa: F811
