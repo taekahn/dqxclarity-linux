@@ -468,6 +468,7 @@ def test_run_no_hooks_installed_exits_and_tears_down(run_env, monkeypatch):
     """No hooks resolve -> Exit(1), and the translator/cache are still torn down (via finally)."""
     import dqxclarity.process.hooks as hookmod
     monkeypatch.setattr(hookmod, "locate", lambda mem, names: [])  # nothing resolves
+    monkeypatch.setattr(cli, "HOOK_LOCATE_RETRY_SECS", 0.0)  # skip the early-attach locate retry (#31)
 
     with pytest.raises(typer.Exit) as ei:
         cli.run(hooks="dialogue", duration=0.0, patch=True)
