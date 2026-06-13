@@ -622,6 +622,179 @@ def scan(
                   "confirms the scanner itself works regardless.[/]")
 
 
+def _set_chat_length(mem, text_addr: int, length: int) -> bool:
+    """Set the edit-control LENGTH (and caret) for the chat buffer at ``text_addr`` to ``length``.
+
+    The game sends the input up to its LENGTH field, NOT the NUL terminator (validated live: with a
+    stale length the send truncates at the sentinel's length). The edit-control object holds a pointer
+    to the text buffer; we find it by reverse-scanning writable memory for a u32 == ``text_addr`` and
+    checking the ``0xFFFFFFFF`` anchor at ``CHAT_EDIT_ANCHOR_OFFSET``. On a match we write ``length``
+    to the LENGTH and CARET fields (caret -> end). Returns True if a length field was set.
+
+    Only the main (largest) buffer has an edit-control; the smaller render copies don't, so a "not
+    found" here is normal for those — the caller sets length only where it can.
+    """
+    import struct
+
+    from .process import signatures as sig
+
+    refs = mem.pattern_scan(struct.pack("<I", text_addr), data_only=True, return_multiple=True) or []
+    set_any = False
+    for r in refs:
+        try:
+            if mem.read_u32(r + sig.CHAT_EDIT_ANCHOR_OFFSET) != sig.CHAT_EDIT_ANCHOR_VALUE:
+                continue
+            mem.write(r + sig.CHAT_EDIT_LENGTH_OFFSET, struct.pack("<I", length))  # send reads this
+            mem.write(r + sig.CHAT_EDIT_CARET_OFFSET, struct.pack("<I", length))   # caret -> end
+            set_any = True
+        except OSError:
+            continue
+    return set_any
+
+
+def _inject_chat_text(mem, text: str, sentinel: str) -> tuple[int, list[tuple[int, int]], int, int]:
+    """Find every live chat-input buffer holding ``sentinel``, overwrite it with ``text``, and set
+    the edit-control length so ``text`` sends in full.
+
+    This is the pure, game-free core of the ``send-text`` command (so it's unit-testable without
+    typer). The mechanism (reverse-engineered + validated live by hand, NOT discovered here):
+
+      * DQX stores the chat input as a null-terminated UTF-8 string with the 4-byte string-object
+        header ``40 44 D8 02`` (CHAT_STRING_HEADER) immediately before the text, and a u32 capacity
+        field immediately before THAT header. Layout: ``[capacity:u32][40 44 D8 02][utf-8 text][00]``.
+        So for a header at H: text starts at H+4 and capacity is read at H-4.
+      * The buffer is REALLOCATED every time the chat box opens, and a write only DISPLAYS while the
+        box is open and actively editing that buffer — so we can't cache an address or rely on a
+        static signature. Instead the user opens chat and types a short ASCII SENTINEL they CAN type
+        (no IME needed); we pattern_scan for ``CHAT_STRING_HEADER + sentinel`` to find the live
+        buffer(s) and overwrite the text in place. The sentinel's LENGTH is irrelevant to the message
+        — it only needs to be findable; the message may be longer (up to the buffer capacity).
+      * There are typically 2-3 live copies with different capacities (e.g. 192/128/32). We write to
+        EVERY matching copy whose capacity is large enough (``len(utf8)+1 <= cap``) and SKIP any that
+        is too small (never overflow). The main input is the 192-cap one, but writing all that fit is
+        robust against not knowing which copy the renderer reads.
+      * CRUCIAL: the game sends up to the edit-control's LENGTH field, not the NUL — so after writing
+        we set that length (and caret) to ``len(utf8)`` via ``_set_chat_length``, else send truncates
+        at the sentinel's length. The user presses Enter themselves (we never simulate the send).
+
+    Before writing each match we re-verify the current text still startswith the sentinel, guarding
+    against clobbering an unrelated buffer that merely happened to match the header+sentinel bytes
+    transiently. Returns ``(written_count, skipped, max_cap, length_set_count)`` where ``skipped`` is a
+    list of ``(capacity, needed)`` pairs for too-small copies, ``max_cap`` is the largest capacity
+    WRITTEN (0 if none), and ``length_set_count`` is how many buffers got their send-length set.
+    """
+    from .process import signatures as sig
+
+    utf8 = text.encode("utf-8")
+    text_len = len(utf8)
+    needed = text_len + 1  # text + NUL
+    sentinel_bytes = sentinel.encode("ascii")
+
+    hits = mem.pattern_scan(sig.CHAT_STRING_HEADER + sentinel_bytes, return_multiple=True) or []
+
+    written = 0
+    skipped: list[tuple[int, int]] = []
+    max_cap = 0
+    length_set = 0
+    for header in hits:
+        text_addr = header + 4
+        try:
+            cap = mem.read_u32(header - 4)
+            current = mem.read_cstring(text_addr, max(needed, len(sentinel_bytes) + 8))
+        except OSError:
+            # A buffer can be freed/remapped between the scan and the read; a transient read error on
+            # one match must not abort the whole send — skip it and try the others.
+            continue
+        # Guard: only overwrite a buffer that STILL holds the sentinel we matched. A header match whose
+        # text no longer starts with the sentinel is stale/unrelated — never clobber it.
+        if not current.startswith(sentinel):
+            continue
+        if needed <= cap:
+            try:
+                if mem.write_cstring(text_addr, text, max_bytes=cap):
+                    written += 1
+                    max_cap = max(max_cap, cap)
+                    if _set_chat_length(mem, text_addr, text_len):
+                        length_set += 1
+            except OSError:
+                continue
+        else:
+            skipped.append((cap, needed))
+    return written, skipped, max_cap, length_set
+
+
+@app.command(name="send-text")
+def send_text(
+    text: str = typer.Argument(..., help="Text to inject into the open chat box (any language)."),
+    sentinel: str = typer.Option(
+        "qzx", "--sentinel",
+        help="The ASCII placeholder you typed in the chat box; the tool finds that buffer and "
+             "replaces it.",
+    ),
+) -> None:
+    """Inject arbitrary text into the game's OPEN chat input box (no Linux Japanese IME needed).
+
+    DQX reallocates the chat-input buffer every time the box opens and only renders writes to the
+    buffer it's actively editing, so we can't cache an address. Instead: open the chat box, type a
+    short ASCII SENTINEL you CAN type (default 'qzx') and nothing else, leave it there, then run this
+    command. It scans the live process for the chat buffer(s) holding that sentinel and overwrites
+    the text in place (UTF-8, all copies that fit; too-small copies are skipped, never overflowed) and
+    sets the edit-control LENGTH so the whole message sends (the game sends up to that length, not the
+    NUL). The sentinel's length doesn't matter — type a short one, send any message up to the buffer
+    capacity. Press Enter in-game yourself to send.
+    """
+    pid = find_game_pid()
+    if pid is None:
+        console.print("[yellow]DQXGame.exe is not running.[/] Start it and open the chat box first.")
+        raise typer.Exit(code=1)
+
+    # The sentinel must be something the user can actually TYPE without an IME, so it has to be ASCII.
+    if not sentinel or not sentinel.isascii():
+        console.print(f"[red]sentinel must be ASCII you can type without an IME[/] (got {sentinel!r}).")
+        raise typer.Exit(code=1)
+
+    from .process.memory_linux import LinuxProcessMemory
+
+    mem = LinuxProcessMemory(pid)
+    try:
+        written, skipped, max_cap, length_set = _inject_chat_text(mem, text, sentinel)
+    except OSError as e:
+        # A transient process_vm_readv/writev failure (region remapped mid-scan) — report cleanly
+        # rather than dumping a traceback; the user can simply re-run.
+        console.print(f"[red]memory access failed:[/] {e} — re-run with the chat box still open.")
+        raise typer.Exit(code=1)
+
+    if written == 0 and not skipped:
+        console.print(
+            f"[yellow]No chat buffer holding '{sentinel}' found.[/] Open the chat input box, type "
+            f"{sentinel} (and nothing else), leave it there, then re-run."
+        )
+        raise typer.Exit(code=1)
+
+    if written == 0:
+        # Every matching copy was too small — the text is longer than the chat buffer can hold. The
+        # main input buffer is 192 bytes (~63 Japanese chars), so report that ceiling.
+        biggest = max(cap for cap, _ in skipped)
+        console.print(
+            f"[red]Text too long for the chat buffer[/] (largest capacity {biggest} bytes, "
+            f"~{biggest // 3} JA chars). Nothing written — shorten the text and re-run."
+        )
+        raise typer.Exit(code=1)
+
+    note = f" ({len(skipped)} smaller copy skipped)" if skipped else ""
+    console.print(
+        f"[green]injected into {written} chat buffer(s)[/] (max capacity {max_cap} bytes){note}. "
+        "Now press Enter in-game to send."
+    )
+    if length_set == 0:
+        # We wrote the text but couldn't find/set the edit-control length — the game may send only up
+        # to the sentinel's length (truncated). Surface it rather than letting a partial message post.
+        console.print(
+            "[yellow]warning:[/] could not set the send-length (edit-control not found) — the send "
+            "may truncate to the sentinel's length. Re-run with the chat box freshly open."
+        )
+
+
 @app.command(name="hook-dialogue")
 def hook_dialogue(
     duration: float = typer.Option(20.0, "--duration", help="Seconds to run before uninstalling."),

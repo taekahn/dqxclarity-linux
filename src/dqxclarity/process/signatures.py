@@ -100,6 +100,30 @@ MENU_AI_NAME = (
 # Comm (chat/communication) names. (32 bytes)
 COMM_NAME = rb"[\xE3\xEF].................\x00\x00\x0F\x00\x00\x00\x01\x02\x00\x00\x01\x00\x00"
 
+# DQX's "@D" string-object header: the 4 bytes ``40 44 D8 02`` that immediately PRECEDE a
+# null-terminated UTF-8 text buffer, with a u32 capacity field immediately before the header. Full
+# layout in memory: ``[capacity:u32][40 44 D8 02][utf-8 text][00]`` — so text_addr = header_addr + 4
+# and capacity is read at header_addr - 4. This header is NOT unique on its own: it's also seen on the
+# login-notice body and other string buffers (see NOTICE_STRING's PREFIX), so it only localizes a
+# SPECIFIC buffer when combined with a known text value living right after it — e.g. the chat
+# send-text flow scans for ``CHAT_STRING_HEADER + <sentinel>`` to find the live chat-input buffer the
+# user just typed the sentinel into.
+CHAT_STRING_HEADER = bytes.fromhex("4044d802")
+
+# Chat EDIT-CONTROL field offsets (reverse-engineered + validated live). The game sends the input up
+# to its LENGTH field (a byte count), NOT to the NUL terminator — so after overwriting the text we
+# MUST also set the length, or send truncates at the sentinel's length. The edit-control object holds
+# a pointer to the text buffer; we locate it by reverse-scanning for a u32 == text_addr and checking
+# the anchor below. All offsets are relative to the location R that holds that text pointer:
+#   R + 40 : a 0xFFFFFFFF sentinel/marker that identifies the edit-control block (anchor)
+#   R + 48 : LENGTH  — text byte count; send reads this many bytes. Set to len(utf8).
+#   R + 52 : CARET   — caret byte position (independent of length; moves with arrow keys). Set to the
+#                      end (== length) so the caret sits after the injected text.
+CHAT_EDIT_ANCHOR_OFFSET = 40
+CHAT_EDIT_ANCHOR_VALUE = 0xFFFFFFFF
+CHAT_EDIT_LENGTH_OFFSET = 48
+CHAT_EDIT_CARET_OFFSET = 52
+
 # "動画配信の際はサーバー" — appears in the login notice box (UTF-8 bytes of the phrase).
 NOTICE_STRING = (
     rb"\xE5\x8B\x95\xE7\x94\xBB\xE9\x85\x8D\xE4\xBF\xA1\xE3\x81\xAE"
