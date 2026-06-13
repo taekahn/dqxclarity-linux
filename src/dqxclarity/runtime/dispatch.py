@@ -481,13 +481,17 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
 
     Two routings, selected by ``cfg.translate.network_translate_all``:
 
-    * TRUE (default) — the "translate the rest" model. The whitelist (NET_TRANSLATE_CATEGORIES) is
-      DROPPED as redundant: ``is_japanese(ja)`` already filters the ~93 noise categories
-      (numbers/dates/<@M_..> tags/English), name-bearing categories (``_is_name_category``) take the
-      instant name-ify pass, NET_IGNORE stays dropped, and EVERY other Japanese category flows to the
-      ASYNC text path. This is what stops the startup "Important Notice" body, community-board post
-      titles, items, and unknown prose from being silently left Japanese. The prose/recap text fns are
-      forced ``sync=False`` so a cache-miss enqueues + returns None WITHOUT lagging the game thread.
+    * TRUE (default) — the HYBRID "translate the rest" model. Two text fns are built: a SYNC
+      ``text_fn`` (caller's ``sync``, = network_text's True → inline MT on a cache-miss) and an ASYNC
+      ``text_fn_async`` (``sync=False`` → a cache-miss enqueues + returns None WITHOUT lagging the game
+      thread). The whitelist (NET_TRANSLATE_CATEGORIES) + the ``<%sM_kaisetubun>`` recap keep their
+      KNOWN-GOOD SYNC routing — they translate immediately as before (no regression); only the EXTRA,
+      non-whitelisted Japanese prose (startup "Important Notice" body, community-board post titles,
+      items, unknown strings) is ADDITIVE via ``text_fn_async``, filling on a later view instead of
+      flashing Japanese-first AND backlogging the single background worker (the bug the earlier
+      all-async build caused). ``is_japanese(ja)`` still filters the ~93 noise categories and
+      name-bearing categories (``_is_name_category``) still take the instant name-ify pass; NET_IGNORE
+      stays dropped.
     * FALSE — the EXACT legacy whitelist routing below (kept verbatim for opt-out / upstream parity).
 
     Both share the name-ify pass (``_translate_name_runs``: player/sibling substitution first, then
@@ -563,6 +567,8 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         if ja.endswith("自分"):
             return ja[:-2] + "self"  # self-reference in a non-name, non-ignored category
         if category == "<%sM_kaisetubun>":
+            # kaisetubun IS whitelisted (in NET_TRANSLATE_CATEGORIES) but needs the narrow-wrap fn, so
+            # it MUST precede the whitelist check below — else it would fall into text_fn (wrong wrap).
             recap = kaisetubun_fn(ja)  # narrower wrap so it doesn't clip the panel's right edge
             return _mark_recap_cutoff(recap) if recap else recap
         if category in NET_TRANSLATE_CATEGORIES:
