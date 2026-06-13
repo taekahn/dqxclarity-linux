@@ -21,6 +21,7 @@ import threading
 import time
 
 from dqxclarity import cli
+from dqxclarity.process.memory_linux import MapRegion
 from dqxclarity.runtime import names_loop
 
 # Reuse the fully-stubbed run() harness + serve outcome helpers from the lifecycle suite. pytest's
@@ -193,13 +194,21 @@ class _OneShotStop:
 
 
 class _CollisionMem:
-    """Minimal mem: every name-pattern scan yields one match whose name is the player's JA name."""
+    """Minimal mem: every name-pattern scan yields one match whose name is the player's JA name.
+
+    The hit at 0x1000 lives inside the single fake region returned by ``scannable_regions`` so the
+    warm-region bookkeeping in names_loop.run can map it back to a region (otherwise the warm set
+    would never populate and behavior would differ from the real loop).
+    """
 
     def __init__(self, ja: str) -> None:
         self._ja = ja
         self.writes: list[str] = []
 
-    def pattern_scan(self, pattern, *, data_only=True, limit=200):
+    def scannable_regions(self, *, data_only=True):
+        return [MapRegion(0x1000, 0x2000, "rw-p", "[heap]")]
+
+    def pattern_scan(self, pattern, *, data_only=True, limit=200, regions=None):
         return [0x1000]
 
     def read_cstring(self, addr, n=64):
@@ -246,3 +255,201 @@ def test_scanner_non_player_name_uses_translate_name():
     names_loop.run(mem, _CollisionTranslator(), stop=_OneShotStop(), interval=0)
     assert mem.writes
     assert all("romaji(スライム)" in w for w in mem.writes)
+
+
+# =============================================================================================== #
+# names_loop.run — warm-region discovery/maintenance split (the lag fix)                          #
+# =============================================================================================== #
+
+
+class _NTickStop:
+    """A stop Event stand-in that lets names_loop.run execute EXACTLY ``n`` tick iterations."""
+
+    def __init__(self, n: int) -> None:
+        self._n = 0
+        self._limit = n
+
+    def is_set(self) -> bool:
+        self._n += 1
+        return self._n > self._limit  # False for the first ``n`` checks, True after
+
+    def wait(self, _timeout) -> None:
+        pass
+
+
+# Three distinct fake data regions. "warm" is where names live; the others are the rest of the heap
+# that a full sweep also pays for but which never contain names.
+_R_WARM = MapRegion(0x10000, 0x11000, "rw-p", "[heap]")
+_R_COLD1 = MapRegion(0x20000, 0x21000, "rw-p", "[anon]")
+_R_COLD2 = MapRegion(0x30000, 0x31000, "rw-p", "[anon]")
+_R_NEW = MapRegion(0x40000, 0x41000, "rw-p", "[heap]")  # where a name appears after a "zone change"
+
+
+class _PlainTranslator:
+    """No player/sibling pins; translate_name just romanizes so JA != EN (so a write happens)."""
+
+    player_name_ja = None
+    player_name_en = None
+    sibling_name_ja = None
+    sibling_name_en = None
+
+    def translate_name(self, ja: str) -> str:
+        return "romaji(" + ja + ")"
+
+
+class _RegionMem:
+    """Fake mem that serves a single JA name living at a configurable address inside a region set.
+
+    ``pattern_scan`` records the region list it was asked to scan (so tests can prove which regions
+    were swept), and returns the hit address only when the hit's owning region is in that list — so
+    a warm-only pass that doesn't include the name's region correctly comes up empty (zone change).
+    """
+
+    def __init__(self, regions: list[MapRegion], hit_addr: int | None, ja: str) -> None:
+        self._regions = regions
+        self._hit_addr = hit_addr  # absolute name match address, or None for "no names anywhere"
+        self._ja = ja
+        self.scan_calls: list[list[MapRegion]] = []  # one entry per pattern_scan call
+        self.writes: list[str] = []
+
+    def set_hit(self, hit_addr: int | None) -> None:
+        self._hit_addr = hit_addr
+
+    def scannable_regions(self, *, data_only=True):
+        return list(self._regions)
+
+    def pattern_scan(self, pattern, *, data_only=True, limit=200, regions=None):
+        scanned = regions if regions is not None else self._regions
+        self.scan_calls.append(list(scanned))
+        if self._hit_addr is None:
+            return []
+        # Return the hit only if its region is among those being scanned this pass.
+        for r in scanned:
+            if r.start <= self._hit_addr < r.end:
+                return [self._hit_addr]
+        return []
+
+    def read_cstring(self, addr, n=64):
+        return self._ja
+
+    def write_cstring(self, addr, text, *, max_bytes):
+        self.writes.append(text)
+        return True
+
+
+# The name-match offset back to the JA string varies per NamePattern; place the hit at the region
+# start and read the JA name regardless of addr (the fake ignores addr), so name_offset is moot.
+def _full_region_calls(mem):
+    """Region lists from scan calls that swept the FULL region set (all three cold+warm regions)."""
+    full = {_R_WARM.start, _R_COLD1.start, _R_COLD2.start}
+    return [c for c in mem.scan_calls if {r.start for r in c} == full]
+
+
+def _warm_only_calls(mem):
+    """Region lists from scan calls that swept ONLY the warm region."""
+    return [c for c in mem.scan_calls if {r.start for r in c} == {_R_WARM.start}]
+
+
+def test_first_tick_full_scan_then_warm_only(monkeypatch):
+    """Tick 1 sweeps ALL regions and populates the warm set; tick 2 scans ONLY the warm region."""
+    monkeypatch.setattr(names_loop, "FULL_RESCAN_SECS", 1000.0)  # don't let the periodic timer fire
+    mem = _RegionMem([_R_WARM, _R_COLD1, _R_COLD2], _R_WARM.start, "スライム")
+
+    stats = names_loop.run(mem, _PlainTranslator(), stop=_NTickStop(2), interval=0)
+
+    # Exactly one full sweep (tick 1) and one warm-only tick (tick 2).
+    assert stats.full_scans == 1
+    assert stats.warm_scans == 1
+    # Tick 1 swept the full set for every pattern; tick 2 swept only the warm region.
+    assert _full_region_calls(mem), "first tick must do a full sweep"
+    assert _warm_only_calls(mem), "second tick must scan only the warm region"
+    # And tick 2 must NOT have re-swept the full set.
+    n_patterns = len(names_loop.NAME_PATTERNS)
+    assert len(_full_region_calls(mem)) == n_patterns       # full sweep happened once (tick 1)
+    assert len(_warm_only_calls(mem)) == n_patterns         # warm-only happened once (tick 2)
+    assert mem.writes  # the name was translated+written
+
+
+def test_periodic_full_rescan_after_timer(monkeypatch):
+    """After FULL_RESCAN_SECS elapses, a full re-sweep happens even with a non-empty warm set."""
+    monkeypatch.setattr(names_loop, "FULL_RESCAN_SECS", 5.0)
+    # Drive a controllable clock so the timer fires deterministically between ticks.
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(names_loop.time, "monotonic", lambda: clock["t"])
+    mem = _RegionMem([_R_WARM, _R_COLD1, _R_COLD2], _R_WARM.start, "スライム")
+
+    # Tick 1: full (warm empty). Tick 2: warm-only (timer not elapsed). Advance past the timer.
+    class _ClockStop:
+        def __init__(self):
+            self._n = 0
+
+        def is_set(self):
+            self._n += 1
+            return self._n > 3  # three ticks
+
+        def wait(self, _t):
+            clock["t"] += 3.0  # each interval advances the clock 3s -> exceeds 5s by tick 3
+
+    names_loop.run(mem, _PlainTranslator(), stop=_ClockStop(), interval=0)
+
+    # Two full sweeps: tick 1 (initial) and tick 3 (periodic timer elapsed at t=1006 >= 1000+5).
+    assert len(_full_region_calls(mem)) == 2 * len(names_loop.NAME_PATTERNS)
+
+
+def test_zone_change_triggers_rediscovery(monkeypatch):
+    """Warm region goes empty (zone change) -> a full rediscovery sweep finds the name's new home."""
+    monkeypatch.setattr(names_loop, "FULL_RESCAN_SECS", 1000.0)  # isolate from the periodic timer
+    # Region set includes both the old warm region and the NEW region the name moves to.
+    mem = _RegionMem([_R_WARM, _R_COLD1, _R_NEW], _R_WARM.start, "スライム")
+
+    # Tick 1: full sweep, name found in _R_WARM -> warm = {_R_WARM}.
+    # Tick 2: warm-only scan of _R_WARM. We move the name to _R_NEW BEFORE tick 2 so the warm scan
+    #         returns zero -> warm cleared.
+    # Tick 3: warm empty + backoff not armed -> full rediscovery sweep, finds the name in _R_NEW.
+    class _MovingStop:
+        def __init__(self):
+            self._n = 0
+
+        def is_set(self):
+            self._n += 1
+            if self._n == 2:
+                mem.set_hit(_R_NEW.start)  # the buffers moved between tick 1 and tick 2
+            return self._n > 3
+
+        def wait(self, _t):
+            pass
+
+    stats = names_loop.run(mem, _PlainTranslator(), stop=_MovingStop(), interval=0)
+
+    # Two full sweeps: the initial discovery and the post-zone-change rediscovery.
+    assert stats.full_scans == 2
+    # Exactly one warm-only tick (tick 2) — the one that came up empty and triggered rediscovery.
+    assert stats.warm_scans == 1
+    # The rediscovery sweep found the name in its new region and wrote it.
+    assert mem.writes, "rediscovery must find and write the moved name"
+
+
+def test_no_names_backs_off_no_repeated_full_sweeps(monkeypatch):
+    """A full sweep that finds nothing must NOT full-sweep again every tick (backoff)."""
+    monkeypatch.setattr(names_loop, "FULL_RESCAN_SECS", 1000.0)  # long backoff so it stays armed
+    clock = {"t": 5000.0}
+    monkeypatch.setattr(names_loop.time, "monotonic", lambda: clock["t"])
+    mem = _RegionMem([_R_WARM, _R_COLD1, _R_COLD2], None, "スライム")  # no names anywhere
+
+    class _ManyTickStop:
+        def __init__(self):
+            self._n = 0
+
+        def is_set(self):
+            self._n += 1
+            return self._n > 10  # ten ticks
+
+        def wait(self, _t):
+            clock["t"] += 1.0  # 1s per tick; well under the 1000s backoff
+
+    stats = names_loop.run(mem, _PlainTranslator(), stop=_ManyTickStop(), interval=0)
+
+    # Across 10 ticks only the FIRST is a full sweep; the rest are backed off (no scan at all).
+    assert stats.full_scans == 1, "must not full-sweep the heap on every tick when there are no names"
+    assert len(_full_region_calls(mem)) == len(names_loop.NAME_PATTERNS)
+    assert not mem.writes

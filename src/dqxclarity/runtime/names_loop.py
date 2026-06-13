@@ -11,13 +11,30 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from ..process.memory_linux import LinuxProcessMemory
+from ..process.memory_linux import LinuxProcessMemory, MapRegion
 from ..process.signatures import NAME_PATTERNS
 from ..translate.pipeline import Translator
+
+# How often we force a FULL sweep of all writable data regions to (re)discover where names live.
+# Between sweeps we only rescan the small "warm" regions that already yielded hits, which is what
+# makes the loop cheap. A module constant so tests can shrink it to drive the timer deterministically.
+FULL_RESCAN_SECS = 20.0
 
 
 def _is_japanese(text: str) -> bool:
     return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" or "＀" <= c <= "￯" for c in text)
+
+
+def _region_for(addr: int, regions: list[MapRegion]) -> MapRegion | None:
+    """Map a hit address back to the MapRegion that contains it (start <= addr < end).
+
+    Linear scan — ``regions`` is the full writable-data list from a sweep (a few hundred entries
+    at most), and we only call this for the handful of hits per pass, so a sort+bisect buys nothing.
+    """
+    for r in regions:
+        if r.start <= addr < r.end:
+            return r
+    return None
 
 
 @dataclass
@@ -25,6 +42,8 @@ class LoopStats:
     scans: int = 0
     seen: int = 0
     written: int = 0
+    full_scans: int = 0  # ticks that did an expensive full-heap sweep
+    warm_scans: int = 0  # ticks that only rescanned the warm regions (the cheap common case)
     samples: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -93,12 +112,70 @@ def run(
     interval: float = 1.0,
     on_write=None,
 ) -> LoopStats:
-    """Run until ``stop`` is set. Returns accumulated stats."""
+    """Run until ``stop`` is set. Returns accumulated stats.
+
+    DISCOVERY vs MAINTENANCE. The naive loop did a FULL sweep of every writable data region
+    (hundreds of MB) for each pattern EVERY tick, which competes with the game for memory bandwidth
+    and lags it. But in steady state nothing new appears: party members don't change while you run
+    around, and a name we already translated is now English in memory (it no longer matches
+    ``_is_japanese``). So we split the work:
+
+      * MAINTENANCE (most ticks): rescan ONLY the "warm" regions — the regions that yielded a name
+        hit on the previous pass (usually 1-3 small buffers). Cheap. This still catches a name that
+        changes in place (a nameplate flipping back to JA) every single tick.
+      * DISCOVERY (rare): a FULL sweep over all data regions, to (re)find where names live now and
+        refresh the warm set.
+
+    A full sweep is triggered when:
+      (a) the warm set is empty AND a backoff timer has elapsed — i.e. we have nowhere cheap to
+          look and we're allowed to go hunting again (the backoff stops us from full-sweeping every
+          tick when there are genuinely no names on screen — extremely common when running through
+          empty areas);
+      (b) the periodic FULL_RESCAN_SECS timer elapsed — a safety net so a name appearing in a brand
+          new region is picked up within ~FULL_RESCAN_SECS even if the warm set is non-empty; or
+      (c) a warm-only pass this tick returned ZERO hits while the warm set was non-empty — the
+          buffers we were watching just emptied/moved (classic zone change), so rediscover NOW
+          rather than waiting out the timer. We do this rediscovery ONCE (not every tick): if the
+          full sweep then also finds nothing, the warm set is empty and case (a)'s backoff governs.
+    """
     stats = LoopStats()
+    warm_regions: list[MapRegion] = []
+    # Region list captured by the most recent FULL sweep — used to map hit addresses back to their
+    # owning region. Warm-only passes reuse this (warm regions are a subset of it); we only refresh
+    # it on a full sweep, which is the only time the region layout could meaningfully change for us.
+    last_full_regions: list[MapRegion] = []
+    # next_full_at: monotonic deadline for the periodic full sweep (case b).
+    # backoff_until: monotonic deadline gating discovery when the warm set is empty (case a). Set
+    # after a full sweep finds nothing so we don't hammer the heap tick after tick.
+    next_full_at = 0.0  # 0 -> the very first tick is always a full sweep (warm set starts empty)
+    backoff_until = 0.0
+
     while not stop.is_set():
         stats.scans += 1
+        now = time.monotonic()
+
+        # ---- decide full vs warm for THIS tick ---------------------------------------------- #
+        # (b) periodic safety-net sweep, or (a) warm set empty and backoff elapsed.
+        do_full = (now >= next_full_at) or (not warm_regions and now >= backoff_until)
+
+        # A non-full tick with no warm regions has nothing to scan and nothing to rediscover (we're
+        # in backoff). Skip the work entirely and wait out the interval.
+        if not do_full and not warm_regions:
+            stop.wait(interval)
+            continue
+
+        all_hits: list[int] = []  # every match address found this pass, for warm-set recomputation
+        if do_full:
+            stats.full_scans += 1
+            last_full_regions = mem.scannable_regions(data_only=True)
+            scan_regions = last_full_regions
+        else:
+            stats.warm_scans += 1
+            scan_regions = warm_regions
+
         for np in NAME_PATTERNS:
-            for match in mem.pattern_scan(np.pattern, data_only=True, limit=200) or []:
+            for match in mem.pattern_scan(np.pattern, limit=200, regions=scan_regions) or []:
+                all_hits.append(match)
                 name_addr = match + np.name_offset
                 ja = mem.read_cstring(name_addr, 64)
                 if not ja or not _is_japanese(ja):
@@ -129,5 +206,34 @@ def run(
                         stats.samples.append((ja, en))
                     if on_write:
                         on_write(ja, en)
+
+        # ---- refresh state from this pass's results ----------------------------------------- #
+        # (c) Zone-change rediscovery: a warm-only pass that came up empty means the buffers we were
+        # watching moved or freed. Drop the (now useless) warm set and let the NEXT iteration's
+        # do_full decision fire immediately (warm empty + backoff not armed -> full sweep). We do
+        # NOT loop-continue here; we just fall through, and because we leave backoff_until alone the
+        # next tick rediscovers at once.
+        if not do_full and warm_regions and not all_hits:
+            warm_regions = []
+            continue  # skip the timer bookkeeping below; rediscover on the very next tick
+
+        # Recompute the warm set = the distinct regions that contained at least one hit this pass.
+        new_warm: list[MapRegion] = []
+        seen_starts: set[int] = set()
+        for addr in all_hits:
+            r = _region_for(addr, last_full_regions)
+            if r is not None and r.start not in seen_starts:
+                seen_starts.add(r.start)
+                new_warm.append(r)
+        warm_regions = new_warm
+
+        if do_full:
+            # Arm the next periodic sweep regardless of outcome.
+            next_full_at = now + FULL_RESCAN_SECS
+            if not warm_regions:
+                # No names anywhere: back off so we don't full-sweep the whole heap every tick while
+                # running through an empty area. Discovery is gated until this deadline (case a).
+                backoff_until = now + FULL_RESCAN_SECS
+
         stop.wait(interval)
     return stats

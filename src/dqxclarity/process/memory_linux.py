@@ -197,6 +197,7 @@ class LinuxProcessMemory:
         data_only: bool = False,
         return_multiple: bool = True,
         limit: int | None = None,
+        regions: list[MapRegion] | None = None,
         _chunk: int = 16 << 20,
     ) -> list[int] | int | None:
         """Search the target's memory for a byte-regex ``pattern`` (matched with re.DOTALL).
@@ -204,12 +205,20 @@ class LinuxProcessMemory:
         Mirrors pymem's ``pattern_scan_all``: returns a list of absolute match addresses when
         ``return_multiple`` else the first address (or None). Large regions are read in chunks
         with overlap so matches spanning a chunk boundary aren't missed.
+
+        When ``regions`` is given, scan EXACTLY those regions instead of the full
+        ``scannable_regions(data_only=...)`` sweep. This is the cheap "warm-region" path used by
+        the name scanner: most ticks only a handful of small regions actually contain names, so
+        rescanning just those avoids re-reading hundreds of MB of heap every tick. ``data_only`` is
+        ignored when ``regions`` is supplied (the caller already chose the region set). When
+        ``regions`` is None the behavior is unchanged from before — existing callers are unaffected.
         """
         rx = re.compile(pattern, re.DOTALL)
         overlap = max(len(pattern), 1024)
         found: list[int] = []
         seen: set[int] = set()  # dedup matches that land in the chunk-overlap zone
-        for region in self.scannable_regions(data_only=data_only):
+        scan_regions = regions if regions is not None else self.scannable_regions(data_only=data_only)
+        for region in scan_regions:
             pos = region.start
             while pos < region.end:
                 size = min(_chunk, region.end - pos)
