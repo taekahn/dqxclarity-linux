@@ -217,7 +217,7 @@ def test_recover_unreadable_addr_does_not_abort_recovery():
     assert not hookjournal.JOURNAL_PATH.exists()
 
 
-# ---- hook_session context manager (shared run / translate-dialogue lifecycle) ------------------ #
+# ---- hook_session context manager (run's hook lifecycle) ------------------------------------- #
 
 
 class FakeHook:

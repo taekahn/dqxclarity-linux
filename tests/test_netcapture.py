@@ -1,12 +1,10 @@
-"""Tests for the network_text CAPTURE recorder + the offline bench-network command + run wiring.
+"""Tests for the network_text CAPTURE recorder + run wiring.
 
   1. NetworkCaptureRecorder.record() accumulates count / unique(capped) / japanese / pct / len stats
      across mixed Japanese + non-Japanese + duplicate inputs; report() orders by count DESC; dump()
      writes valid JSON round-trippable to report().
   2. The capture fn run() builds returns None for EVERY input and records what it saw.
-  3. bench-network: a tiny capture JSON + a fake translator (deterministic translate_now sleep, one
-     lookup cache-hit) produces per-category latency + cache-hit numbers without error.
-  4. run() wiring: --capture-network installs the capture fn for network_text and writes the report
+  3. run() wiring: --capture-network installs the capture fn for network_text and writes the report
      file on exit (reusing the test_lifecycle run_env mocking style).
 
 All pure/offline: no game, /proc, network, or install is touched.
@@ -145,104 +143,6 @@ def test_capture_fn_returns_none_and_records_every_input():
     assert report["totals"]["calls"] == 3
     assert report["categories"]["<%sM_header>"]["count"] == 2
     assert report["categories"]["<%sB_VALUE>"]["count"] == 1
-
-
-# =============================================================================================== #
-# bench-network                                                                                    #
-# =============================================================================================== #
-
-
-class _FakeProvider:
-    name = "fake"
-
-
-class _FakeBenchTranslator:
-    """A translator whose translate_now sleeps a deterministic tiny amount; lookup hits one string."""
-
-    def __init__(self) -> None:
-        self.sync_provider = _FakeProvider()
-        self.upgrade_provider = None
-        self.started = False
-
-        class _Cache:
-            def close(self_inner):
-                self_inner.closed = True
-
-        self.cache = _Cache()
-
-    def start(self):
-        self.started = True
-
-    def stop(self):
-        pass
-
-    def lookup(self, ja):
-        # Exactly ONE string is a cache hit.
-        return "cached-en" if ja == JA else None
-
-    def translate_now(self, ja):
-        import time
-        time.sleep(0.001)        # deterministic tiny latency so perf_counter sees > 0
-        return f"en:{ja}"
-
-
-def test_bench_network_produces_latency_and_cache_numbers(tmp_path, monkeypatch, capsys):
-    # A tiny capture report: one Japanese category (2 samples, one of which is the cache-hit) and one
-    # no-Japanese category that --japanese-only must skip.
-    report = {
-        "totals": {"calls": 3, "categories": 2, "japanese": 2},
-        "categories": {
-            "<%sM_header>": {
-                "count": 2, "unique": 2, "japanese": 2, "pct_japanese": 100.0,
-                "len_min": 1, "len_max": 5, "len_avg": 3.0, "samples": [JA, JA2],
-            },
-            "<%sB_VALUE>": {
-                "count": 1, "unique": 1, "japanese": 0, "pct_japanese": 0.0,
-                "len_min": 2, "len_max": 2, "len_avg": 2.0, "samples": ["42"],
-            },
-        },
-    }
-    cap = tmp_path / "capture.json"
-    cap.write_text(json.dumps(report), encoding="utf-8")
-
-    fake = _FakeBenchTranslator()
-    monkeypatch.setattr(cli, "_build_translator", lambda c: fake)
-    import dqxclarity.config as cfg_mod
-    monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config())
-
-    cli.bench_network(capture_json=cap, limit=20, japanese_only=True)
-
-    out = capsys.readouterr().out
-    # The Japanese category was benchmarked; the no-Japanese one was skipped.
-    assert "<%sM_header>" in out
-    assert "<%sB_VALUE>" not in out
-    # Heads-up about real network calls printed.
-    assert "REAL translation calls" in out
-    assert fake.started is True
-
-
-def test_bench_network_japanese_only_false_includes_all(tmp_path, monkeypatch, capsys):
-    report = {
-        "totals": {"calls": 1, "categories": 1, "japanese": 0},
-        "categories": {
-            "<%sB_VALUE>": {
-                "count": 1, "unique": 1, "japanese": 0, "pct_japanese": 0.0,
-                "len_min": 2, "len_max": 2, "len_avg": 2.0, "samples": ["42"],
-            },
-        },
-    }
-    cap = tmp_path / "capture.json"
-    cap.write_text(json.dumps(report), encoding="utf-8")
-
-    fake = _FakeBenchTranslator()
-    monkeypatch.setattr(cli, "_build_translator", lambda c: fake)
-    import dqxclarity.config as cfg_mod
-    monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config())
-
-    cli.bench_network(capture_json=cap, limit=5, japanese_only=False)
-
-    out = capsys.readouterr().out
-    assert "<%sB_VALUE>" in out   # included now that japanese_only is False
 
 
 # =============================================================================================== #

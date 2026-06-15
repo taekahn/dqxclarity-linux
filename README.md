@@ -35,11 +35,10 @@ dqxclarity patch --config --launcher   # also patch DQXConfig.exe + DQXLauncher.
 dqxclarity restore                # roll back to the most recent backup
 dqxclarity scan                   # find/read Japanese text in the live game (diagnostic)
 dqxclarity romanize "たろう"       # local JP->romaji demo (no game needed)
-dqxclarity names                  # live-translate player/NPC names in the running game
 dqxclarity sync                   # download the curated community dialogue dataset (~4k+ lines)
-dqxclarity run                    # live-translate all surfaces (dialogue, quests, …) at once
+dqxclarity run                    # live-translate all surfaces (dialogue, quests, names, …) at once
 dqxclarity run --hooks dialogue   # or just specific surfaces
-dqxclarity translate-dialogue     # dialogue only (verbose community-vs-MT logging)
+dqxclarity send-text "ごめんね"     # inject text into the open chat box (Linux IME bypass)
 dqxclarity translate-text "…"     # translate one string via the configured provider
 dqxclarity config show
 dqxclarity config set install_root "/path/to/DRAGON QUEST X"
@@ -78,10 +77,10 @@ set your character/sibling names so the `<pnplacehold>`/`<snplacehold>` entries 
 ```sh
 dqxclarity config set translate.player_name_ja "タイカン"
 dqxclarity config set translate.player_name_en "Taikan"
-dqxclarity translate-dialogue        # community hit -> as-is; otherwise MT fallback
+dqxclarity run                       # community hit -> as-is; otherwise MT fallback
 ```
 
-`translate-dialogue` installs a native blocking detour at the dialogue function: it pauses the
+`run`'s dialogue hook installs a native blocking detour at the dialogue function: it pauses the
 game thread, looks the line up (community first, then optional MT with control-tag preservation
 and box-width wrapping), writes the English back, and continues. Restores original bytes on exit.
 

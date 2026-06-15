@@ -103,8 +103,8 @@ def recover_orphans(mem, game_pid: int) -> list[int]:
 def hook_session(mem, game_pid: int, hooks, *, console):
     """Lifecycle for a set of installed hooks: crash-recovery journal + signal-safe restore.
 
-    Wraps the full orphan-safety lifecycle so ``run`` and ``translate-dialogue`` (and any future
-    command that installs detours) share ONE implementation of these subtle, load-bearing rules:
+    Wraps the full orphan-safety lifecycle so ``run`` (and any future command that installs
+    detours) shares ONE implementation of these subtle, load-bearing rules:
 
       * Installs SIGTERM/SIGHUP handlers that only flip the yielded ``stop`` event (never raise —
         raising could interrupt a mid-write). ``kill <pid>``, a terminal close, or ``systemd stop``
