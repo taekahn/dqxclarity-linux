@@ -18,10 +18,11 @@ See [`PLAN.md`](PLAN.md) for the full design, decisions, and Phase 0 spike resul
 
 ```sh
 python -m venv .venv && . .venv/bin/activate   # fish: source .venv/bin/activate.fish
-pip install -e .
-# live-translation backend (later phases):
-pip install -e '.[frida]'
+pip install -e .             # runtime: patch + live-translate
+pip install -e '.[dev]'      # + dev tools (pytest, ruff) — needed to run the test suite
 ```
+
+Live translation uses native in-process hooking (no Frida). Run the tests with `pytest`.
 
 ## Usage
 
