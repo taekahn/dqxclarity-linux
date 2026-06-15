@@ -24,6 +24,12 @@ app = typer.Typer(
 )
 console = Console()
 
+# Default surfaces for a bare `dqxclarity run` — ALL of them (the README documents `run` as
+# "live-translate all surfaces at once"). This list must grow whenever a new hook surface is added;
+# leaving it stale silently disables surfaces for everyone who doesn't pass --hooks. 'player' is
+# included so name<->placeholder substitution + the name scanner get the live player/sibling names.
+DEFAULT_HOOKS = "dialogue,quest,walkthrough,corner_text,nameplates,network_text,player"
+
 # How long a fresh attach keeps retrying to LOCATE the requested hook functions when the first scan
 # finds NONE — the early-attach total miss (#31): the game is still loading and a function's code page
 # isn't resolvable yet. Retrying until it settles lets us hook at the earliest possible moment (e.g. to
@@ -1109,11 +1115,11 @@ def translate_dialogue(
 @app.command()
 def run(
     hooks: str = typer.Option(
-        "dialogue,quest", "--hooks",
-        help="Comma-separated surfaces. Text: dialogue, quest, walkthrough, corner_text, "
-             "nameplates, network_text. Add 'player' to auto-detect your + your sibling's name "
-             "from the login struct (read-only) so name<->placeholder matching works without "
-             "manual config (e.g. --hooks dialogue,quest,player).",
+        DEFAULT_HOOKS, "--hooks",
+        help="Comma-separated surfaces. Default = ALL: dialogue, quest, walkthrough, corner_text, "
+             "nameplates, network_text, player. 'player' auto-detects your + your sibling's name "
+             "from the login struct (read-only) so name<->placeholder matching works without manual "
+             "config. Pass a subset to translate only specific surfaces (e.g. --hooks dialogue).",
     ),
     duration: float = typer.Option(0.0, "--duration", help="Run N seconds (0 = until Ctrl-C)."),
     patch: bool = typer.Option(
