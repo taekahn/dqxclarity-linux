@@ -10,9 +10,19 @@ from __future__ import annotations
 
 import html
 import re
+import time
 import urllib.parse
 
 import httpx
+
+# The free endpoint flakes intermittently — it returns a page with NO result-container (or rate-limits
+# with an HTTP error) on a request that succeeds moments later. This is especially common on glossified
+# mixed Japanese+English input (a glossary term like 駅->"train station" injected into JA confuses it).
+# A couple of quick retries turn those transient empties into a hit; a genuinely empty result-container
+# is returned as-is (no retry). Kept small so a real outage still fails fast (the caller leaves the text
+# Japanese and the surface re-fires on the next view).
+_ATTEMPTS = 3
+_RETRY_BACKOFF = 0.25
 
 _RESULT_RE = re.compile(r'<div class="result-container">(.*?)</div>', re.DOTALL)
 _UA = (
@@ -40,12 +50,18 @@ class GoogleTranslateFreeProvider:
         if not phrase.strip():
             return None
         q = urllib.parse.quote(phrase)
-        try:
-            resp = self._client.get(f"https://translate.google.com/m?hl=en&sl=ja&tl=en&q={q}")
-            resp.raise_for_status()
-        except httpx.HTTPError:
-            return None
-        m = _RESULT_RE.search(resp.text)
-        if not m:
-            return None
-        return html.unescape(m.group(1).strip()) or None
+        url = f"https://translate.google.com/m?hl=en&sl=ja&tl=en&q={q}"
+        for attempt in range(_ATTEMPTS):
+            try:
+                resp = self._client.get(url)
+                resp.raise_for_status()
+            except httpx.HTTPError:
+                resp = None
+            if resp is not None:
+                m = _RESULT_RE.search(resp.text)
+                if m:  # got the result container -> that's the answer (even if it's empty -> None)
+                    return html.unescape(m.group(1).strip()) or None
+            # HTTP error or no result container = a transient flake; retry after a short backoff.
+            if attempt + 1 < _ATTEMPTS:
+                time.sleep(_RETRY_BACKOFF)
+        return None

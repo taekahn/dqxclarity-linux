@@ -248,3 +248,68 @@ def test_parse_non_array_result_returns_all_none():
 def test_parse_length_mismatch_returns_all_none():
     env = json.dumps({"result": '["a", "b", "c"]'})
     assert ClaudeCliProvider._parse(env, 2) == [None, None]
+
+
+# --- GoogleTranslateFreeProvider: transient-empty retry (added 2026-06-15) -------------------- #
+
+
+class _FakeResp:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        pass
+
+
+def test_google_retries_transient_missing_result_container(monkeypatch):
+    """The free endpoint flakes (no result-container) on a request that succeeds moments later —
+    especially on glossified mixed JA+EN strings. A retry must turn that transient empty into a hit."""
+    from dqxclarity.translate.providers import googletranslatefree as g
+
+    p = g.GoogleTranslateFreeProvider()
+    monkeypatch.setattr(g.time, "sleep", lambda *_: None)  # don't actually back off in tests
+    calls = {"n": 0}
+
+    def fake_get(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeResp("<html>flaked: no result container</html>")  # transient empty
+        return _FakeResp('<div class="result-container">Hello.</div>')
+
+    monkeypatch.setattr(p._client, "get", fake_get)
+    assert p.translate(["こんにちは"]) == ["Hello."]
+    assert calls["n"] == 2  # retried exactly once before succeeding
+
+
+def test_google_gives_up_after_bounded_attempts(monkeypatch):
+    """A genuine outage (always empty) fails fast after _ATTEMPTS — caller leaves text Japanese."""
+    from dqxclarity.translate.providers import googletranslatefree as g
+
+    p = g.GoogleTranslateFreeProvider()
+    monkeypatch.setattr(g.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def fake_get(url):
+        calls["n"] += 1
+        return _FakeResp("<html>no container</html>")
+
+    monkeypatch.setattr(p._client, "get", fake_get)
+    assert p.translate(["x"]) == [None]
+    assert calls["n"] == g._ATTEMPTS  # bounded — didn't loop forever
+
+
+def test_google_no_retry_on_real_empty_result(monkeypatch):
+    """An empty result-container is a REAL answer (not a flake) -> return None WITHOUT retrying."""
+    from dqxclarity.translate.providers import googletranslatefree as g
+
+    p = g.GoogleTranslateFreeProvider()
+    monkeypatch.setattr(g.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def fake_get(url):
+        calls["n"] += 1
+        return _FakeResp('<div class="result-container"></div>')  # found, but empty
+
+    monkeypatch.setattr(p._client, "get", fake_get)
+    assert p.translate(["x"]) == [None]
+    assert calls["n"] == 1  # found the container first try -> no retry
