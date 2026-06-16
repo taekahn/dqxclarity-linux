@@ -41,6 +41,14 @@ def _xlate(translator: Translator, ja_text: str, sync: bool) -> tuple[str | None
         return norm, False
     en = translator.lookup(norm)
     if en is not None and en != norm:
+        # Cache hit. Still queue a quality upgrade: this fragment may be cached at a LOWER quality
+        # (e.g. googletranslatefree) than the configured background provider (e.g. claude_cli), and
+        # the dialogue path reaches the cache via lookup() directly — it never goes through
+        # translate_now(), which is the only other place that requests an upgrade on a hit. Without
+        # this, an already-cached dialogue line is NEVER upgraded on re-view (the whole point of the
+        # two-tier design), so dialogue silently stays at first-view quality forever. request_upgrade
+        # is a no-op when no strictly-better provider exists or the line is already in flight.
+        translator.request_upgrade(norm)
         return en, False
     if sync:
         en = translator.translate_now(norm)

@@ -230,6 +230,38 @@ def test_cache_hit_async_surface_skips_provider(tmp_path):
     c.close()
 
 
+def test_dialogue_cache_hit_queues_quality_upgrade(tmp_path):
+    """A dialogue fragment cached at rank-1 (google) must be UPGRADED to claude on re-view.
+
+    Regression for the dead upgrade-on-re-view path: the dialogue surface reaches the cache via
+    _xlate -> translator.lookup() directly (not translate_now), so a cache HIT used to return the
+    rank-1 text and NEVER enqueue an upgrade. Result: every already-cached dialogue line stayed at
+    first-view (google) quality forever even with claude enabled. The fix requests an upgrade on the
+    hit path; here the background worker must then flip the entry to claude_cli.
+    """
+    from dqxclarity.translate.dialogue import translate_conversation
+
+    ja = "「ここはジュレットの町。"
+    key = normalize_source(ja)
+    c = TranslationCache(tmp_path / "c.db")
+    c.store(key, "This is the town of Julet.", "googletranslatefree")  # rank 1, from a prior session
+    sync = _suffixer("googletranslatefree", "-s1")
+    upgrade = _suffixer("claude_cli", "-c2")  # rank 2 -> strictly better
+    t = Translator(c, sync_provider=sync, upgrade_provider=upgrade)
+    t.start()
+
+    # Re-view the line: served from cache (the existing google EN), sync provider NOT re-invoked.
+    out = translate_conversation(t, ja, sync=True)
+    assert out is not None and "Julet" in out          # rendered from the cache hit
+    assert sync.calls == []                             # a hit must not re-call the sync provider
+
+    # ...but the hit MUST have queued a background upgrade, which flips the entry to claude_cli.
+    assert _wait_until(lambda: c.source_of(key) == "claude_cli"), c.source_of(key)
+    assert c.lookup(key) == "EN-c2"
+    t.stop()
+    c.close()
+
+
 # ===========================================================================================
 # MT-output polish lands in the CACHE: glossify (input) + honorific-strip (input) + normalize (out).
 # ===========================================================================================
