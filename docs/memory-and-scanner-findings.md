@@ -14,9 +14,11 @@ the Update log at the bottom).
 
 - **~1,533 mapped regions, ~5.2 GB** of address space total.
 - **~272–275 are writable data regions (~1 GB)** — this is what a *full* name-scan sweep reads.
-- **Two anonymous `rwxp` arenas dominate: ~403 MB + ~241 MB = ~64% of the swept bytes.** These are the
-  game's big heap/object pools (textures, models, audio, game-object structs). A 58-byte party-name
-  record essentially never lives here.
+- **Two anonymous `rwxp` arenas dominate: ~403 MB + ~241 MB = ~64% of the swept bytes.** Big
+  game-object/data pools. **CORRECTION (town scan 2026-06-15): the 241 MB arena `0x267a2000` DOES hold
+  name records** — `menu_ai_name` (party-member) records, including the player ("Taikan"), live there
+  among masses of similar-looking structured data. So "names never live in the giant arenas" is FALSE.
+  (The other giant, ~403 MB `0x3a10000`, showed no name hits.) ⇒ size-filtering discovery is unsafe.
 - The other ~270 regions are a **long tail of small heaps** (median region ≈ 40 KB).
 - **The entire game heap is `rwxp`** (read/write/**execute**) — unusual, and the reason we can place
   detour code caves in it *and* why scans must cover executable arenas.
@@ -117,25 +119,35 @@ that is usually absent or already done.
 2. **Aggressive/exponential discovery backoff.** Each consecutive sweep that finds nothing pushes the
    next out (20 → 40 → 80 → cap), reset instantly when any name appears. Overworld settles to a sweep
    every minute-plus. Cheap, low risk; new names take a little longer to first appear.
-3. **Skip the giant arenas / size-class filter.** Name records never live in the 403 MB / 241 MB
-   pools; exclude regions over a size threshold (or only ever-sweep regions that have yielded a name
-   hit this session). Cuts any sweep that does run by ~5×.
+3. ~~Skip the giant arenas / size-class filter.~~ **DEAD (town scan): party records live in the 241 MB
+   arena `0x267a2000`, so size-filtering would break them.** Restricting to "regions that ever yielded
+   a name hit" still includes that 241 MB arena ⇒ little savings. Region-level restriction is out;
+   the win is tracking **addresses** (option 1), since records sit at a handful of specific addresses
+   even inside that arena (re-reading ~10 addresses vs re-scanning 241 MB).
 4. **Context-gate discovery on a UI signal** (elegant endgame): only sweep `menu_ai_name` when the
    party HUD is active, `comm_name` when chat is flowing — if we can find a "panel/chat active" flag
    or piggyback on a hook firing. Eliminates idle sweeps.
 5. **Amortize** (#34): spread any remaining sweep across N ticks so it's never a single spike.
 6. **Two-stage / cheaper match** for whatever we do scan.
 
-Current lean: **#1 + #2 (+ #3)** kill the overworld lag with low complexity; **#4** is the endgame.
+Current lean (revised after town scan): **#1 (remember addresses) is the primary win** — records sit
+at ~10 specific addresses even inside the 241 MB arena, so re-reading those beats re-scanning. Pair
+with **#2 (backoff)** and **#4 (context-gate)** to make *discovery* rare. **#3 (region/size filter) is
+out** (party records live in a 241 MB arena). #5 amortize still helps the unavoidable discovery sweep.
 
 ## 7. Open questions / to measure
 
-- Exactly which regions + size-class the **live Japanese** name records occupy (need them resident &
-  untranslated to capture — i.e. probe right as a panel/NPC/chat first appears, before translation).
-- Is there a findable **UI-state flag** (party HUD active / chat active / zone id) to gate discovery?
-- The current-session value of the `@D` header (to re-derive it at runtime for send-text/notice).
-- Do `menu_ai_name` records persist while running around (with a party) or only while a specific
-  surface is open? ("all names translated" suggests they were present and got translated.)
+- **`concierge_name` matched 0 in a major town** (both JA and struct-agnostic) — the pattern may be
+  drifted/wrong on this build, or those specific service-NPC records weren't near. If town NPC names
+  aren't translating, this pattern is the suspect. *(Needs investigation — possible dead/broken sig.)*
+- **`comm_name` struct-agnostic match is far too loose** — without the trailing JA-lead byte it hit
+  3069 places (mostly garbage in the 241 MB arena); the fixed trailer `00 00 0F …` is common there.
+  The JA-lead byte is load-bearing for `comm_name`'s specificity, so a translation-agnostic re-find
+  for `comm_name` isn't viable as-is — need a tighter anchor.
+- Capturing records **while still Japanese** (probe the instant content first appears, before the
+  service translates) to see the untranslated region distribution.
+- A findable **UI-state flag** (party HUD / chat active / zone id) to gate discovery (#4).
+- The current-session value of the `@D` header (re-derive at runtime for send-text/notice — task #36).
 
 ---
 
@@ -145,3 +157,10 @@ Current lean: **#1 + #2 (+ #3)** kill the overworld lag with low complexity; **#
   per-launch pointer (84k→0 across relaunch) → send-text/notice fragility; name patterns match only
   Japanese → confirmed root cause of running-around lag is **blind sweeps after everything is already
   translated** (user confirmed all on-screen names were translated). Solution directions captured.
+- **2026-06-15 (major-town scan)** — Plot twist: **`menu_ai_name` (party) records live INSIDE the
+  241 MB arena `0x267a2000`** (found "Taikan"/"Hesutei" there, already English). So "names avoid the
+  giant arenas" was wrong; **killed solution #3 (size/region filter)** — re-prioritized to #1 (track
+  addresses). `concierge_name` matched **0** in town (possible drifted/broken sig — flagged). The
+  struct-agnostic `comm_name` re-find is too loose (3069 mostly-garbage hits) — JA-lead byte is
+  load-bearing. All on-screen names were already English (JA-only patterns = 0), re-confirming the
+  blind-sweep-after-translation root cause.
