@@ -108,13 +108,18 @@ def _make_community_lookup(cfg, translator):
 
 
 def build_translate_fn(
-    cfg, translator, *, wrap_width=None, lines_per_page=None, sync=None, suppression=None
+    cfg, translator, *, wrap_width=None, lines_per_page=None, sync=None, suppression=None,
+    surface=None,
 ):
     """Return (translate_fn, community_lookup) for the given config + translator.
 
     The keyword overrides let a caller supply a per-surface format profile (from a HookSpec).
     Each falls back to the config default (or, for ``sync``, the presence of a fast sync provider)
     when left ``None``, so existing callers keep the dialogue behaviour unchanged.
+
+    ``surface`` is an optional register hint (e.g. "dialogue", "quest") captured by this closure and
+    threaded into ``translate_conversation`` -> the background enqueue, so the rich Claude provider
+    can match the line's register. Defaults to None, so every existing caller is unaffected.
 
     ``suppression`` is an optional ``translate.suppression.SuppressionIndex``. When supplied, a
     BAD STRING pre-pass runs FIRST — BEFORE the community lookup and MT — exactly like upstream's
@@ -128,7 +133,11 @@ def build_translate_fn(
 
     community_lookup = _make_community_lookup(cfg, translator)
 
-    def translate_fn(ja: str) -> str | None:
+    def translate_fn(ja: str, surface_override: str | None = None) -> str | None:
+        # ``surface_override`` lets a per-call caller (e.g. network_text, whose register hint depends
+        # on the runtime ``category``) supply a more specific surface than this closure's build-time
+        # default. It defaults to None, so the normal single-arg ``fn(ja)`` callers are unaffected and
+        # fall back to the captured ``surface``.
         if not is_japanese(ja):
             return None
         if suppression is not None:
@@ -152,7 +161,10 @@ def build_translate_fn(
             if lpp < 1:
                 hit = hit.replace("\n<br>\n", "\n").replace("<br>", "\n")
             return hit
-        return translate_conversation(translator, ja, width, lpp, sync=fast)
+        return translate_conversation(
+            translator, ja, width, lpp, sync=fast,
+            surface=surface if surface_override is None else surface_override,
+        )
 
     return translate_fn, community_lookup
 
@@ -207,7 +219,7 @@ class FieldRouter:
 
 def build_quest_translate_fn(
     cfg, translator, *, reward_field_indices, items_dict,
-    wrap_width=None, lines_per_page=None, sync=None, suppression=None,
+    wrap_width=None, lines_per_page=None, sync=None, suppression=None, surface=None,
 ):
     """Return a ``FieldRouter`` for the quest hook: prose fn for most fields, reward fn for the rewards.
 
@@ -219,7 +231,7 @@ def build_quest_translate_fn(
     """
     default_fn, _ = build_translate_fn(
         cfg, translator, wrap_width=wrap_width, lines_per_page=lines_per_page,
-        sync=sync, suppression=suppression,
+        sync=sync, suppression=suppression, surface=surface,
     )
     reward_fn = build_rewards_translate_fn(items_dict)
     overrides = {i: reward_fn for i in reward_field_indices}
@@ -523,6 +535,10 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
     """
     translate_all = getattr(cfg.translate, "network_translate_all", True)
 
+    def _net_surface(category: str) -> str:
+        """Register hint for the rich Claude provider: ``network_text`` + the per-call category."""
+        return f"network_text ({category})" if category else "network_text"
+
     name_fn = build_name_translate_fn(cfg, translator)
     # HYBRID (fixes the live "more Japanese" backslide): the WHITELISTED prose (the known-good 28) +
     # the recap stay SYNC/immediate exactly as the legacy path (text_fn uses the caller's ``sync`` =
@@ -571,11 +587,11 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         if category == "<%sM_kaisetubun>":
             # kaisetubun IS whitelisted (in NET_TRANSLATE_CATEGORIES) but needs the narrow-wrap fn, so
             # it MUST precede the whitelist check below — else it would fall into text_fn (wrong wrap).
-            recap = kaisetubun_fn(ja)  # narrower wrap so it doesn't clip the panel's right edge
+            recap = kaisetubun_fn(ja, _net_surface(category))  # narrower wrap; register hint threaded
             return _mark_recap_cutoff(recap) if recap else recap
         if category in NET_TRANSLATE_CATEGORIES:
-            return text_fn(ja)        # whitelisted prose -> SYNC/immediate (identical to the legacy path)
-        return text_fn_async(ja)      # the REST (board/unknown prose) -> cold-async; fills on a later view
+            return text_fn(ja, _net_surface(category))  # whitelisted prose -> SYNC (identical routing)
+        return text_fn_async(ja, _net_surface(category))  # the REST (board/unknown) -> cold-async
 
     if translate_all:
         return translate_all_fn
@@ -608,9 +624,9 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         if category in NET_NAME_CATEGORIES:
             return name_fn(ja)
         if category == "<%sM_kaisetubun>":
-            recap = kaisetubun_fn(ja)  # narrower wrap so it doesn't clip the panel's right edge
+            recap = kaisetubun_fn(ja, _net_surface(category))  # narrower wrap; register hint threaded
             return _mark_recap_cutoff(recap) if recap else recap  # mark the bottom cut-off if any
-        return text_fn(ja)
+        return text_fn(ja, _net_surface(category))
 
     return translate_fn
 

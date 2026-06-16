@@ -74,7 +74,7 @@ class Translator:
         # changes — the PLAYER hook can swap the names at runtime, so we key the cache on the names.
         self._honorific_key: tuple[str, str] | None = None
         self._honorific_patterns: list[re.Pattern[str]] = []
-        self._q: queue.Queue[str] = queue.Queue()
+        self._q: queue.Queue[tuple[str, str | None]] = queue.Queue()
         self._inflight: set[str] = set()
         self._inflight_lock = threading.Lock()
         self._worker: threading.Thread | None = None
@@ -244,12 +244,13 @@ class Translator:
         hits = self.glossary.reference_hits(protected) if self.glossary else {}
         return protected, hits
 
-    def _build_claude_items(self, batch: list[str]) -> list[dict]:
+    def _build_claude_items(self, batch: list[tuple[str, str | None]]) -> list[dict]:
         """Build the rich-context items for the Claude provider — derivable purely from ``ja`` + state.
 
         Each item carries the protected JA (glossary as a REFERENCE, not substituted), the known
         player/sibling name pairs, and the rough google baseline we're upgrading (only when the
-        current cache source is a rank-1 MT). ``surface`` stays None until Increment 2.
+        current cache source is a rank-1 MT). ``surface`` is the per-line register hint threaded in
+        from the dispatch closure (Increment 2); None when the caller didn't supply one.
         """
         names: dict[str, str] = {}
         if self.player_name_ja and self.player_name_en:
@@ -257,24 +258,26 @@ class Translator:
         if self.sibling_name_ja and self.sibling_name_en:
             names[self.sibling_name_ja] = self.sibling_name_en
         items: list[dict] = []
-        for ja in batch:
+        for ja, surface in batch:
             protected, hits = self._prepare_for_claude(ja)
             src = self.cache.source_of(ja)
             baseline = self.cache.lookup(ja) if src in ("googletranslatefree", "google") else None
             items.append(
-                {"ja": protected, "glossary": hits, "names": names, "baseline": baseline, "surface": None}
+                {"ja": protected, "glossary": hits, "names": names, "baseline": baseline, "surface": surface}
             )
         return items
 
-    def translate_now(self, ja: str) -> str | None:
+    def translate_now(self, ja: str, *, surface: str | None = None) -> str | None:
         """Synchronous fast translate for first-view; enqueues a background quality upgrade.
 
         Blocks until the fast provider returns. Returns None on miss/failure. If the cache already
         has an entry, returns it (and queues an upgrade if a better provider could improve it).
+        ``surface`` is the optional register hint threaded down to the background enqueue so the
+        first-view upgrade carries the same surface label as a re-view would (Increment 2).
         """
         hit = self.cache.lookup(ja)
         if hit is not None:
-            self.request_upgrade(ja)
+            self.request_upgrade(ja, surface=surface)
             return hit
         if self.sync_provider is None:
             return None
@@ -297,7 +300,7 @@ class Translator:
             # can't strip a sentinel character; the sentinels are already ASCII and survive it.
             en = restore_tags(en)
             self.cache.store_if_better(ja, en, self.sync_provider.name)
-            self.request_upgrade(ja)
+            self.request_upgrade(ja, surface=surface)
         return en
 
     # ----- background translate/upgrade worker ---------------------------- #
@@ -324,15 +327,21 @@ class Translator:
             # wrongly skip it when the background provider is also rank 1 (google) — this is the case.
         return rank_of(source) < rank_of(bg.name)  # already translated -> only re-do for a real upgrade
 
-    def request_upgrade(self, ja: str) -> None:
-        """Queue a string for a slow, higher-quality re-translation (no-op if not worthwhile)."""
+    def request_upgrade(self, ja: str, *, surface: str | None = None) -> None:
+        """Queue a string for a slow, higher-quality re-translation (no-op if not worthwhile).
+
+        ``surface`` is an optional register hint (e.g. "dialogue", "quest", "network_text (...)")
+        threaded in from the dispatch closure; it rides the queue alongside ``ja`` and is surfaced to
+        the rich Claude provider as ``item["surface"]``. The ``_inflight`` dedupe is keyed on ``ja``
+        ONLY (never the tuple), so the same line is never queued twice regardless of its surface.
+        """
         if not self._wants_upgrade(ja):
             return
         with self._inflight_lock:
             if ja in self._inflight:
                 return
             self._inflight.add(ja)
-        self._q.put(ja)
+        self._q.put((ja, surface))
 
     # Back-compat alias for the async-only path.
     request = request_upgrade
@@ -368,10 +377,10 @@ class Translator:
                 if hasattr(bg, "translate_rich"):
                     results = bg.translate_rich(self._build_claude_items(batch))
                 else:
-                    results = bg.translate([self._prepare_for_mt(ja) for ja in batch])
+                    results = bg.translate([self._prepare_for_mt(ja) for ja, _ in batch])
             except Exception:  # noqa: BLE001 - provider must not kill the worker
                 results = [None] * len(batch)
-            for ja, en in zip(batch, results):
+            for (ja, _surface), en in zip(batch, results):
                 if en:
                     # Fold provider output to font-renderable ASCII (GAP #22); provider output only,
                     # then restore the protected tags (typo-tolerant) AFTER the fold (#14).
@@ -379,9 +388,9 @@ class Translator:
                         ja, restore_tags(self._normalize_mt_output(en)), bg.name
                     )
             with self._inflight_lock:
-                self._inflight.difference_update(batch)
+                self._inflight.difference_update(ja for ja, _ in batch)
 
-    def _drain_batch(self) -> list[str]:
+    def _drain_batch(self) -> list[tuple[str, str | None]]:
         try:
             first = self._q.get(timeout=0.5)
         except queue.Empty:

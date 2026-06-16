@@ -28,11 +28,14 @@ def _is_japanese(text: str) -> bool:
     return bool(_JA_RE.search(text))
 
 
-def _xlate(translator: Translator, ja_text: str, sync: bool) -> tuple[str | None, bool]:
+def _xlate(
+    translator: Translator, ja_text: str, sync: bool, surface: str | None = None
+) -> tuple[str | None, bool]:
     """Translate one text fragment. Returns (english_or_None, pending).
 
     ``sync`` translates inline (first-view, for fast providers on the blocking hook); otherwise it
-    queues for background MT and reports pending.
+    queues for background MT and reports pending. ``surface`` is the optional register hint threaded
+    from the dispatch closure; it rides the enqueue so the rich Claude provider can match register.
     """
     norm = normalize_source(ja_text)
     if not norm:
@@ -48,17 +51,17 @@ def _xlate(translator: Translator, ja_text: str, sync: bool) -> tuple[str | None
         # this, an already-cached dialogue line is NEVER upgraded on re-view (the whole point of the
         # two-tier design), so dialogue silently stays at first-view quality forever. request_upgrade
         # is a no-op when no strictly-better provider exists or the line is already in flight.
-        translator.request_upgrade(norm)
+        translator.request_upgrade(norm, surface=surface)
         return en, False
     if sync:
-        en = translator.translate_now(norm)
+        en = translator.translate_now(norm, surface=surface)
         return (en, False) if en else (None, True)
-    translator.request(norm)
+    translator.request(norm, surface=surface)
     return None, True
 
 
 def _translate_body(
-    translator: Translator, ja: str, width: int, lpp: int, sync: bool
+    translator: Translator, ja: str, width: int, lpp: int, sync: bool, surface: str | None = None
 ) -> tuple[str | None, bool]:
     """Translate a dialogue body, preserving tags and wrapping. Returns (text_or_None, pending)."""
     flattened = ja.replace("<br>", " ")
@@ -70,7 +73,7 @@ def _translate_body(
         if _TAG_RE.fullmatch(part):
             items.append(("tag", part))
             continue
-        en, p = _xlate(translator, part, sync)
+        en, p = _xlate(translator, part, sync, surface)
         if p:
             pending = True
         elif en:
@@ -98,17 +101,19 @@ def _translate_body(
 
 
 def translate_conversation(
-    translator: Translator, ja: str, width: int = 46, lines_per_page: int = 3, sync: bool = False
+    translator: Translator, ja: str, width: int = 46, lines_per_page: int = 3, sync: bool = False,
+    surface: str | None = None,
 ) -> str | None:
     """Translate dialogue, preserving control tags and menu structure.
 
     With ``sync`` (fast provider on the blocking hook), missing fragments are translated inline so
     the line renders in English on first view. Otherwise missing fragments are queued for
-    background MT and the function returns None until everything is cached.
+    background MT and the function returns None until everything is cached. ``surface`` is the
+    optional register hint threaded from the dispatch closure down to each background enqueue.
     """
     sel = _SELECT_RE.search(ja)
     if not sel:
-        out, pending = _translate_body(translator, ja, width, lines_per_page, sync)
+        out, pending = _translate_body(translator, ja, width, lines_per_page, sync, surface)
         if pending:
             return None
         # No-pagination profile (e.g. the quest menu, which renders <br> literally): join the
@@ -121,7 +126,9 @@ def translate_conversation(
 
     # Choice menu: translate the lead-in dialogue normally, each option on its own line, and keep
     # the <select>/<select_end>/<case>/<break>/<case_end> scaffold intact.
-    dialogue, pending = _translate_body(translator, ja[: sel.start()], width, lines_per_page, sync)
+    dialogue, pending = _translate_body(
+        translator, ja[: sel.start()], width, lines_per_page, sync, surface
+    )
     if pending:
         return None
     options: list[str] = []
@@ -129,7 +136,7 @@ def translate_conversation(
         opt = opt.strip()
         if not opt:
             continue
-        en, p = _xlate(translator, opt, sync)
+        en, p = _xlate(translator, opt, sync, surface)
         if p:
             return None  # wait until every option is translated
         if en:

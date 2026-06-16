@@ -453,6 +453,146 @@ def test_plain_provider_without_translate_rich_uses_substituting_path(tmp_path):
     c.close()
 
 
+# ----- Increment 2: surface/register threading through the queue ------------------------------ #
+
+
+def test_rich_worker_carries_surface_from_request_upgrade(tmp_path):
+    """request_upgrade(ja, surface=...) threads the register hint into the rich item's ["surface"]."""
+    c = TranslationCache(tmp_path / "c.db")
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg)
+    t.start()
+    t.request_upgrade("こんにちは", surface="dialogue")
+    assert _wait_until(lambda: c.source_of("こんにちは") == "claude_cli")
+    t.stop()
+    assert bg.seen_items is not None
+    assert bg.seen_items[0]["surface"] == "dialogue"
+    c.close()
+
+
+def test_rich_worker_surface_defaults_to_none_for_bare_request(tmp_path):
+    """A bare request(ja) with NO surface yields ["surface"] == None (back-compat)."""
+    c = TranslationCache(tmp_path / "c.db")
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg)
+    t.start()
+    t.request("おやすみ")                                  # no surface kwarg -> defaults to None
+    assert _wait_until(lambda: c.source_of("おやすみ") == "claude_cli")
+    t.stop()
+    assert bg.seen_items is not None
+    assert bg.seen_items[0]["surface"] is None
+    c.close()
+
+
+def test_inflight_dedupes_double_enqueue_keyed_on_ja_only(tmp_path):
+    """_inflight keys on ``ja`` ONLY: a double-enqueue of the same ja (even with a surface) is one job."""
+    c = TranslationCache(tmp_path / "c.db")
+    bg = StubRichProvider()
+    # batch_size=1 so the worker can only ever process one entry per drain; if the same ja were
+    # enqueued twice it would surface as two distinct cache writes / two seen batches.
+    t = Translator(c, sync_provider=None, upgrade_provider=bg, batch_size=1)
+    # Enqueue the same ja twice BEFORE starting the worker, with DIFFERENT surfaces, so the dedupe
+    # decision is made on ``ja`` alone (not the (ja, surface) tuple).
+    t.request_upgrade("ありがとう", surface="dialogue")
+    t.request_upgrade("ありがとう", surface="quest")       # same ja -> deduped, never enqueued twice
+    assert t._q.qsize() == 1                                # only ONE entry on the queue
+    t.start()
+    assert _wait_until(lambda: c.source_of("ありがとう") == "claude_cli")
+    t.stop()
+    assert t._q.qsize() == 0                                # nothing left over from a phantom dupe
+    # The single job carried the FIRST surface (the one that won the inflight insert).
+    assert bg.seen_items is not None and bg.seen_items[0]["surface"] == "dialogue"
+    c.close()
+
+
+def test_dialogue_path_threads_surface_into_rich_item(tmp_path):
+    """End-to-end: a cached dialogue line re-viewed via translate_conversation(surface=...) upgrades
+    with that surface forwarded into the rich item — the dialogue closure's register hint reaches
+    the enqueue."""
+    from dqxclarity.translate.dialogue import translate_conversation
+
+    ja = "「ここはジュレットの町。"
+    key = normalize_source(ja)
+    c = TranslationCache(tmp_path / "c.db")
+    c.store(key, "This is the town of Julet.", "googletranslatefree")  # rank 1
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg)
+    t.start()
+    out = translate_conversation(t, ja, sync=False, surface="dialogue")
+    assert out is not None and "Julet" in out              # served from the cache hit
+    assert _wait_until(lambda: c.source_of(key) == "claude_cli")
+    t.stop()
+    assert bg.seen_items is not None
+    assert bg.seen_items[0]["surface"] == "dialogue"
+    c.close()
+
+
+def test_first_view_sync_path_threads_surface_into_rich_item(tmp_path):
+    """A FRESH (uncached) sync-surface line: translate_now first-view stores rank-1, then the
+    first background upgrade it enqueues must ALSO carry the surface (not just the re-view path)."""
+    from dqxclarity.translate.dialogue import translate_conversation
+
+    ja = "「こんにちは。"
+    key = normalize_source(ja)
+    c = TranslationCache(tmp_path / "c.db")
+    sync = _suffixer("googletranslatefree", "-s1")         # rank 1; translates first-view
+    bg = StubRichProvider()                                # rank 2; the upgrade
+    t = Translator(c, sync_provider=sync, upgrade_provider=bg)
+    t.start()
+    out = translate_conversation(t, ja, sync=True, surface="dialogue")  # first view, cache MISS
+    assert out is not None                                 # rendered via the sync provider
+    assert _wait_until(lambda: c.source_of(key) == "claude_cli")        # upgraded in the background
+    t.stop()
+    assert bg.seen_items is not None
+    assert bg.seen_items[0]["surface"] == "dialogue"       # first-view upgrade carries the surface
+    c.close()
+
+
+def test_dispatch_dialogue_closure_threads_surface(tmp_path):
+    """build_translate_fn(surface="dialogue") forwards "dialogue" into the rich item on an upgrade.
+
+    The raw ja differs from its normalized form, so the dispatch-level community_lookup (which keys
+    on the raw ja) MISSES and falls through to translate_conversation, whose _xlate normalizes the
+    fragment, hits the cache, and enqueues the surface-bearing upgrade.
+    """
+    ja = "ものがたりの　つづき。"
+    key = normalize_source(ja)                              # full-width space -> ASCII space (raw != key)
+    c = TranslationCache(tmp_path / "c.db")
+    c.store(key, "The story continues.", "googletranslatefree")  # rank 1 cache hit on the NORMALIZED key
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg)
+    t.start()
+    fn, _ = build_translate_fn(_cfg(), t, sync=False, surface="dialogue")
+    out = fn(ja)
+    assert out is not None and "story" in out              # cache hit (via the normalized fragment key)
+    assert _wait_until(lambda: c.source_of(key) == "claude_cli")
+    t.stop()
+    assert bg.seen_items is not None
+    assert bg.seen_items[0]["surface"] == "dialogue"
+    c.close()
+
+
+def test_dispatch_network_text_threads_category_surface(tmp_path):
+    """build_network_translate_fn composes "network_text (<category>)" and threads it to the enqueue."""
+    ja = "ものがたりの　つづき。"
+    key = normalize_source(ja)
+    c = TranslationCache(tmp_path / "c.db")
+    c.store(key, "rough draft.", "googletranslatefree")    # rank 1 -> upgradeable to claude
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg)
+    t.start()
+    # network_translate_all=False -> legacy whitelist path; <%sM_00> is a whitelisted generic string
+    # routed SYNC to the text path. The cache hit returns immediately and enqueues the upgrade.
+    fn = build_network_translate_fn(_cfg(), t, lines_per_page=0, sync=True)
+    out = fn(ja, "<%sM_00>")
+    assert out is not None                                 # served from the cache hit
+    assert _wait_until(lambda: c.source_of(key) == "claude_cli")
+    t.stop()
+    assert bg.seen_items is not None
+    assert bg.seen_items[0]["surface"] == "network_text (<%sM_00>)"
+    c.close()
+
+
 # ===========================================================================================
 # End-to-end through dispatch: build_translate_fn / build_name_translate_fn / build_network_*.
 # ===========================================================================================

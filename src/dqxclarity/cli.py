@@ -1031,12 +1031,15 @@ def run(
                 cfg, translator, reward_field_indices=spec.reward_field_indices,
                 items_dict=reward_items, wrap_width=spec.wrap_width,
                 lines_per_page=spec.lines_per_page, sync=spec.sync,
-                suppression=suppression_index,
+                suppression=suppression_index, surface=spec.name,
             )
+        # The remaining prose surfaces (dialogue/walkthrough/corner_text). ``spec.name`` is the
+        # register hint threaded to the rich Claude provider so it can match the line's register
+        # (the labels documented in _SYSTEM_RICH: "dialogue"/"quest"/etc.).
         fn, _ = build_translate_fn(
             cfg, translator, wrap_width=spec.wrap_width,
             lines_per_page=spec.lines_per_page, sync=spec.sync,
-            suppression=suppression_index,
+            suppression=suppression_index, surface=spec.name,
         )
         return fn
 
@@ -1058,7 +1061,7 @@ def run(
         cfg, translator, wrap_width=notice_loop.NOTICE_WRAP_WIDTH,
         lines_per_page=0,  # no <br> pagination: the notice carries its own literal <PAGE> breaks
         sync=True,  # one-shot off the hot path -> block on MT so it fills on the first tick it's seen
-        suppression=suppression_index,
+        suppression=suppression_index, surface="notice",
     )
 
     # --- SUPERVISORY RE-ATTACH LOOP ------------------------------------------------------------ #
