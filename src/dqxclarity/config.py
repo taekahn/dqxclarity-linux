@@ -23,10 +23,15 @@ class TranslateConfig:
     # "none" = pure-local; "googletranslatefree" = free Google (no key, ~200ms).
     provider: str = "none"
     # Slow, higher-quality MT run in the background to UPGRADE cache entries (so a re-viewed line
-    # shows the better translation). "" = off; "claude_cli" = your Claude subscription.
+    # shows the better translation). "" = off; "claude" = auto-resolve (prefers the metered HTTP API
+    # when ANTHROPIC_API_KEY is set, else the "claude" CLI subscription); "claude_cli"/"claude_api"
+    # force one transport explicitly.
     upgrade_provider: str = ""
     batch_size: int = 16  # strings per claude_cli invocation (amortizes CLI startup)
-    claude_model: str = ""  # optional `claude -p --model` override (e.g. "haiku"); "" = default
+    # Optional model override: the `claude -p --model` flag for the CLI (short aliases like "haiku"
+    # are fine) AND the model id for claude_api (the HTTP API needs a FULL id, e.g.
+    # "claude-haiku-4-5", not "haiku"). "" = each provider's default (claude_api defaults to Sonnet).
+    claude_model: str = ""
     romanize_names: bool = True  # romanize player/NPC names locally via pykakasi
     wrap_width: int = 46  # dialogue line wrap width (chars); tune to the in-game box
     lines_per_page: int = 3  # lines per <br> page break; tune to the in-game box height

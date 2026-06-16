@@ -365,10 +365,18 @@ def _build_translator(cfg: cfg_mod.Config):
     # re-downloaded here. A missing/offline glossary loads empty and glossify becomes a no-op.
     glossary = load_glossary(cfg_mod.CONFIG_DIR / "cache", download=False)
 
+    upgrade_provider = _provider(cfg.translate.upgrade_provider)  # slow, background upgrade
+    # The "claude" alias auto-resolves api->cli and returns None (with a RuntimeWarning) when neither
+    # an ANTHROPIC_API_KEY nor a `claude` CLI is available. Surface that as a visible service-log line.
+    if upgrade_provider is None and cfg.translate.upgrade_provider == "claude":
+        console.print(
+            "[yellow]Claude upgrade unavailable: set ANTHROPIC_API_KEY or install the claude CLI.[/]"
+        )
+
     translator = Translator(
         cache,
         sync_provider=_provider(cfg.translate.provider),  # fast, first-view
-        upgrade_provider=_provider(cfg.translate.upgrade_provider),  # slow, background upgrade
+        upgrade_provider=upgrade_provider,
         romanize_names=cfg.translate.romanize_names,
         batch_size=cfg.translate.batch_size,
         glossary=glossary,

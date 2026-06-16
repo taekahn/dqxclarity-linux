@@ -16,7 +16,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS translations (
     ja      TEXT PRIMARY KEY,
     en      TEXT NOT NULL,
-    source  TEXT NOT NULL,   -- 'community' | 'claude_cli' | 'googletranslatefree' | 'romaji'
+    source  TEXT NOT NULL,   -- 'community' | 'claude_api' | 'claude_cli' | 'googletranslatefree' | 'romaji'
     updated REAL NOT NULL
 );
 """
