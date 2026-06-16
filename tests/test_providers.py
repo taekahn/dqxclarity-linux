@@ -250,6 +250,170 @@ def test_parse_length_mismatch_returns_all_none():
     assert ClaudeCliProvider._parse(env, 2) == [None, None]
 
 
+# ===================================================================== claude_cli.translate_rich()
+
+
+from dqxclarity.translate.providers.claude_cli import _SYSTEM_RICH
+
+
+def _items(n: int) -> list[dict]:
+    return [
+        {"ja": f"ja{i}", "glossary": {}, "names": {}, "baseline": None, "surface": None}
+        for i in range(n)
+    ]
+
+
+def test_translate_rich_builds_expected_invocation(monkeypatch):
+    """The rich path embeds _SYSTEM_RICH + the items JSON, uses -p/--output-format json (+ --model)."""
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    captured = {}
+
+    def fake_run(cmd, **k):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout=_envelope(["A", "B"]))
+
+    monkeypatch.setattr(claude_mod.subprocess, "run", fake_run)
+
+    items = _items(2)
+    out = ClaudeCliProvider(model="haiku").translate_rich(items)
+    assert out == ["A", "B"]
+
+    cmd = captured["cmd"]
+    assert cmd[:2] == ["/usr/bin/claude", "-p"]
+    prompt = cmd[2]
+    assert _SYSTEM_RICH in prompt
+    assert json.dumps(items, ensure_ascii=False) in prompt  # items embedded verbatim
+    assert cmd[3:5] == ["--output-format", "json"]
+    assert cmd[5:] == ["--model", "haiku"]
+
+
+def test_translate_rich_parses_array_of_strings(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        claude_mod.subprocess, "run", lambda *a, **k: _FakeProc(stdout=_envelope(["One", "Two"]))
+    )
+    assert ClaudeCliProvider().translate_rich(_items(2)) == ["One", "Two"]
+
+
+def test_translate_rich_parses_array_of_en_objects(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        claude_mod.subprocess,
+        "run",
+        lambda *a, **k: _FakeProc(stdout=_envelope([{"en": "One"}, {"en": "Two"}])),
+    )
+    assert ClaudeCliProvider().translate_rich(_items(2)) == ["One", "Two"]
+
+
+def test_translate_rich_length_mismatch_returns_all_none(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        claude_mod.subprocess, "run", lambda *a, **k: _FakeProc(stdout=_envelope(["only-one"]))
+    )
+    assert ClaudeCliProvider().translate_rich(_items(2)) == [None, None]
+
+
+def test_translate_rich_dict_without_en_rejects_batch(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        claude_mod.subprocess,
+        "run",
+        lambda *a, **k: _FakeProc(stdout=_envelope([{"text": "One"}, {"en": "Two"}])),
+    )
+    assert ClaudeCliProvider().translate_rich(_items(2)) == [None, None]
+
+
+def test_translate_rich_empty_input_short_circuits(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    called = []
+    monkeypatch.setattr(claude_mod.subprocess, "run", lambda *a, **k: called.append(1))
+    assert ClaudeCliProvider().translate_rich([]) == []
+    assert called == []
+
+
+def test_translate_rich_no_binary_returns_all_none(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: None)
+    called = []
+    monkeypatch.setattr(claude_mod.subprocess, "run", lambda *a, **k: called.append(1))
+    assert ClaudeCliProvider().translate_rich(_items(2)) == [None, None]
+    assert called == []
+
+
+def test_translate_rich_nonzero_exit_returns_all_none(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        claude_mod.subprocess, "run", lambda *a, **k: _FakeProc(stdout="boom", returncode=1)
+    )
+    assert ClaudeCliProvider().translate_rich(_items(2)) == [None, None]
+
+
+def test_translate_rich_timeout_returns_all_none(monkeypatch):
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=1.0)
+
+    monkeypatch.setattr(claude_mod.subprocess, "run", boom)
+    assert ClaudeCliProvider().translate_rich(_items(3)) == [None, None, None]
+
+
+def test_translate_rich_oserror_returns_all_none(monkeypatch):
+    """Parity with translate(): an OSError launching the binary degrades to None per item."""
+    monkeypatch.setattr(claude_mod.shutil, "which", lambda _: "/usr/bin/claude")
+
+    def boom(*a, **k):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(claude_mod.subprocess, "run", boom)
+    assert ClaudeCliProvider().translate_rich(_items(2)) == [None, None]
+
+
+# ======================================================================== claude_cli._parse_rich()
+
+
+def test_parse_rich_string_array():
+    assert ClaudeCliProvider._parse_rich(_envelope(["Hi", "Bye"]), 2) == ["Hi", "Bye"]
+
+
+def test_parse_rich_bare_array_without_envelope():
+    # Parity with _parse: a bare result (no JSON envelope) parses directly.
+    assert ClaudeCliProvider._parse_rich('["Hi", "Bye"]', 2) == ["Hi", "Bye"]
+
+
+def test_parse_rich_object_array():
+    env = _envelope([{"en": "Hi"}, {"en": "Bye"}])
+    assert ClaudeCliProvider._parse_rich(env, 2) == ["Hi", "Bye"]
+
+
+def test_parse_rich_json_fenced():
+    fenced = json.dumps({"result": '```json\n["A", "B"]\n```'})
+    assert ClaudeCliProvider._parse_rich(fenced, 2) == ["A", "B"]
+
+
+def test_parse_rich_prose_wrapped():
+    env = json.dumps({"result": 'Here you go: ["X", "Y"] enjoy'})
+    assert ClaudeCliProvider._parse_rich(env, 2) == ["X", "Y"]
+
+
+def test_parse_rich_length_mismatch():
+    assert ClaudeCliProvider._parse_rich(_envelope(["a", "b", "c"]), 2) == [None, None]
+
+
+def test_parse_rich_garbage_returns_all_none():
+    assert ClaudeCliProvider._parse_rich("not json at all", 2) == [None, None]
+
+
+def test_parse_rich_null_entries_preserved():
+    env = _envelope(["A", None, "C"])
+    assert ClaudeCliProvider._parse_rich(env, 3) == ["A", None, "C"]
+
+
+def test_parse_rich_other_type_rejects_batch():
+    # A bare number/list element is neither str/None/{"en":...} -> reject the whole batch.
+    env = _envelope(["A", 5])
+    assert ClaudeCliProvider._parse_rich(env, 2) == [None, None]
+
+
 # --- GoogleTranslateFreeProvider: transient-empty retry (added 2026-06-15) -------------------- #
 
 

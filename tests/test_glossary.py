@@ -40,6 +40,27 @@ def test_glossify_substitutes_padded_and_collapses_spaces():
     assert g.glossify("ローレシア") == "Laure Sia "
 
 
+def test_reference_hits_returns_pins_present_longest_first():
+    # reference_hits maps each term PRESENT in text to its EN, with the same longest-first matcher
+    # as glossify: "アストルティア" wins over its prefix "アスト" (the prefix never matches inside it).
+    g = Glossary([("アスト", "Ast"), ("アストルティア", "Astoltia")])
+    assert g.reference_hits("アストルティアの世界") == {"アストルティア": "Astoltia"}
+
+
+def test_reference_hits_does_not_mutate_input():
+    # reference_hits is PURE: it never substitutes — the input string is returned to the caller as-is
+    # (the caller sends the original JA to MT and passes these as reference pins).
+    g = Glossary([("スライム", "Slime")])
+    text = "スライムだ"
+    assert g.reference_hits(text) == {"スライム": "Slime"}
+    assert text == "スライムだ"  # unchanged
+
+
+def test_reference_hits_empty_glossary_returns_empty_dict():
+    g = Glossary([])
+    assert g.reference_hits("なにもない") == {}
+
+
 def test_glossify_noop_when_empty():
     # An empty glossary is a no-op (the offline guard): text passes through unchanged.
     g = Glossary([])

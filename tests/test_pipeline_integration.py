@@ -350,6 +350,110 @@ def test_background_worker_normalizes_and_glossifies(tmp_path):
 
 
 # ===========================================================================================
+# Rich-context Claude channel (Increment 1): the worker derives rich items from ja + state.
+# ===========================================================================================
+
+
+class StubRichProvider:
+    """A claude_cli-shaped provider exposing BOTH translate() and translate_rich().
+
+    translate_rich records the exact ``items`` the worker built (``seen_items``) so a test can assert
+    the glossary-as-reference / baseline / names channels, and returns ASCII "EN-rich" per item (the
+    pipeline folds output to ASCII, so an English-only stub is the realistic shape). The presence of
+    translate_rich is what the worker's ``hasattr`` branch selects.
+    """
+
+    def __init__(self):
+        self.name = "claude_cli"
+        self.seen_items: list[dict] | None = None
+        self.calls: list[list[str]] = []
+
+    def available(self) -> bool:
+        return True
+
+    def translate(self, texts):
+        self.calls.append(list(texts))
+        return ["EN-plain"] * len(texts)
+
+    def translate_rich(self, items):
+        self.seen_items = items
+        return ["EN-rich"] * len(items)
+
+
+def test_rich_worker_passes_glossary_as_reference_not_substituted(tmp_path):
+    """The rich path sends the ORIGINAL JA term (NOT glossified) plus the pin as reference context."""
+    c = TranslationCache(tmp_path / "c.db")
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg,
+                   glossary=Glossary([("スライム", "Slime")]))
+    t.start()
+    t.request("スライムあらわる")
+    assert _wait_until(lambda: c.source_of("スライムあらわる") == "claude_cli")
+    t.stop()
+    assert bg.seen_items is not None
+    item = bg.seen_items[0]
+    assert "スライム" in item["ja"]                 # JA term NOT substituted (reference, not glossify)
+    assert item["glossary"] == {"スライム": "Slime"}  # pin carried as reference
+    assert c.lookup("スライムあらわる") == "EN-rich"
+    c.close()
+
+
+def test_rich_worker_carries_google_baseline_and_flips_source(tmp_path):
+    """A pre-stored rank-1 google entry rides along as ["baseline"]; the run flips it to claude_cli."""
+    c = TranslationCache(tmp_path / "c.db")
+    c.store("おはよう", "rough en", "googletranslatefree")
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg)
+    t.start()
+    t.request("おはよう")
+    assert _wait_until(lambda: c.source_of("おはよう") == "claude_cli")
+    t.stop()
+    assert bg.seen_items[0]["baseline"] == "rough en"
+    assert c.lookup("おはよう") == "EN-rich"
+    c.close()
+
+
+def test_rich_worker_carries_names_and_shields_them_in_ja(tmp_path):
+    """Known player names appear in ["names"] and the shielded EN-name sentinel appears in ["ja"]."""
+    from dqxclarity.translate.tags import shield_name, _NAME_SHIELD_SENTINEL
+
+    c = TranslationCache(tmp_path / "c.db")
+    bg = StubRichProvider()
+    t = Translator(c, sync_provider=None, upgrade_provider=bg)
+    t.player_name_ja = "タイカン"
+    t.player_name_en = "Taikan"
+    t.start()
+    t.request("タイカンは　いった")
+    assert _wait_until(lambda: c.source_of("タイカンは　いった") == "claude_cli")
+    t.stop()
+    item = bg.seen_items[0]
+    assert item["names"] == {"タイカン": "Taikan"}
+    assert _NAME_SHIELD_SENTINEL in item["ja"]            # shielded EN-name sentinel <&7_ab>
+    assert shield_name("Taikan") in item["ja"]
+    c.close()
+
+
+def test_plain_provider_without_translate_rich_uses_substituting_path(tmp_path):
+    """Regression guard for the hasattr branch: a plain provider gets a glossify-SUBSTITUTED string."""
+    c = TranslationCache(tmp_path / "c.db")
+    seen: list[str] = []
+
+    def transform(text):
+        seen.append(text)
+        return "DONE"
+
+    upgrade = StubProvider("claude_cli", transform)  # NO translate_rich attribute
+    t = Translator(c, sync_provider=None, upgrade_provider=upgrade,
+                   glossary=Glossary([("スライム", "Slime")]))
+    t.start()
+    t.request("スライムあらわる")
+    assert _wait_until(lambda: c.lookup("スライムあらわる") is not None)
+    t.stop()
+    assert seen == ["Slime あらわる"]                      # plain path SUBSTITUTES (not a rich item)
+    c.close()
+
+
+# ===========================================================================================
 # End-to-end through dispatch: build_translate_fn / build_name_translate_fn / build_network_*.
 # ===========================================================================================
 

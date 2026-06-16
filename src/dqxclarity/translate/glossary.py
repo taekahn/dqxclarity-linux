@@ -109,6 +109,12 @@ class Glossary:
         out = re.sub(r" {2,}", " ", out)
         return out.lstrip()
 
+    def reference_hits(self, text: str) -> dict[str, str]:
+        """Glossary terms PRESENT in text, as {ja: en}, WITHOUT substituting (for MT reference context)."""
+        if self._matcher is None or not text:
+            return {}
+        return {m.group(0): self._repl[m.group(0)] for m in self._matcher.finditer(text)}
+
 
 def glossify(text: str, glossary: Glossary | None) -> str:
     """Module-level convenience: glossify ``text`` with ``glossary`` (no-op if it's None/empty)."""

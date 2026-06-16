@@ -235,6 +235,37 @@ class Translator:
             self.glossary,
         )
 
+    def _prepare_for_claude(self, ja: str) -> tuple[str, dict[str, str]]:
+        """Claude MT input: same as _prepare_for_mt but glossary becomes a REFERENCE, not a substitution."""
+        protected = protect_tags(
+            self._shield_names(self._strip_name_honorifics(ja)),
+            self.sibling_relationship,
+        )
+        hits = self.glossary.reference_hits(protected) if self.glossary else {}
+        return protected, hits
+
+    def _build_claude_items(self, batch: list[str]) -> list[dict]:
+        """Build the rich-context items for the Claude provider — derivable purely from ``ja`` + state.
+
+        Each item carries the protected JA (glossary as a REFERENCE, not substituted), the known
+        player/sibling name pairs, and the rough google baseline we're upgrading (only when the
+        current cache source is a rank-1 MT). ``surface`` stays None until Increment 2.
+        """
+        names: dict[str, str] = {}
+        if self.player_name_ja and self.player_name_en:
+            names[self.player_name_ja] = self.player_name_en
+        if self.sibling_name_ja and self.sibling_name_en:
+            names[self.sibling_name_ja] = self.sibling_name_en
+        items: list[dict] = []
+        for ja in batch:
+            protected, hits = self._prepare_for_claude(ja)
+            src = self.cache.source_of(ja)
+            baseline = self.cache.lookup(ja) if src in ("googletranslatefree", "google") else None
+            items.append(
+                {"ja": protected, "glossary": hits, "names": names, "baseline": baseline, "surface": None}
+            )
+        return items
+
     def translate_now(self, ja: str) -> str | None:
         """Synchronous fast translate for first-view; enqueues a background quality upgrade.
 
@@ -329,9 +360,15 @@ class Translator:
             # provider gets identical input — the name shield MUST be applied here too, not just on
             # the sync path. Cache under the original keys in ``batch`` so cache/community lookups
             # still match.
-            to_translate = [self._prepare_for_mt(ja) for ja in batch]
+            # A provider exposing translate_rich (claude_cli) gets the full rich-context channel:
+            # clean(er) JA, glossary as REFERENCE (not substituted), player/sibling names, and the
+            # rough google baseline — all derived here from ``ja`` + translator state (no queue
+            # changes). A plain provider (Google) keeps the substituting _prepare_for_mt path.
             try:
-                results = bg.translate(to_translate)
+                if hasattr(bg, "translate_rich"):
+                    results = bg.translate_rich(self._build_claude_items(batch))
+                else:
+                    results = bg.translate([self._prepare_for_mt(ja) for ja in batch])
             except Exception:  # noqa: BLE001 - provider must not kill the worker
                 results = [None] * len(batch)
             for ja, en in zip(batch, results):
