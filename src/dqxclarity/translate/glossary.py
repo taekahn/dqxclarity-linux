@@ -41,6 +41,21 @@ CUSTOM_TRANSLATIONS_ZIP_URL = (
 _GLOSSARY_RE = re.compile(r"(?:/csv/|/generate_glossary/).*glossary\.csv$")
 
 
+def _is_corrupt_row(ja: str, en: str) -> bool:
+    """True for a glossary row whose English value is poisoned data we must not substitute.
+
+    The upstream glossary has a few corrupt rows whose EN is nothing but quote characters — e.g.
+    ``と頼まれた。`` ("...I was asked.") -> ``""""""``. Those JA keys are ubiquitous sentence
+    endings, so glossifying them injects six literal quotes into the MT source and shreds the
+    output (this was the dialogue-corruption bug). A real glossary value is a name/word and is
+    never bare quotes, so dropping quote-only EN is surgical: it removes exactly the poison and
+    leaves legitimate rows (including JA->JA speech normalizations like ``ワガハイ``->``わがはい``)
+    untouched.
+    """
+    stripped = en.strip()
+    return bool(stripped) and all(c in "\"'`" for c in stripped)
+
+
 class Glossary:
     """An ordered (longest-JA-first) term map with a single cached compiled matcher.
 
@@ -122,7 +137,7 @@ def parse_glossary_csv(data: bytes | str) -> list[tuple[str, str]]:
             continue
         ja, en = record.split(",", 1)
         ja, en = ja.strip(), en.strip()
-        if ja and en:
+        if ja and en and not _is_corrupt_row(ja, en):
             rows.append((ja, en))
     return rows
 

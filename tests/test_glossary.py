@@ -70,6 +70,41 @@ def test_parse_glossary_csv_splits_on_first_comma():
     assert len(rows) == 2  # blank + comma-less lines dropped
 
 
+def test_parse_glossary_csv_drops_quote_only_corrupt_rows():
+    # The upstream glossary has a few poisoned rows whose EN is nothing but quote characters —
+    # e.g. ``と頼まれた。`` ("...I was asked.") -> ``""""""``. That JA key is a ubiquitous sentence
+    # ending, so substituting it injected six literal quotes into the MT source and shredded the
+    # output (the dialogue-corruption bug). parse_glossary_csv must drop such rows on load.
+    csv = 'と頼まれた。,""""""\nと言われた。,""""""\nスライム,Slime\n'
+    rows = parse_glossary_csv(csv)
+    assert ("スライム", "Slime") in rows
+    assert all(en.strip('"') for _, en in rows)  # no row survives with a quote-only value
+    assert len(rows) == 1  # both quote-only rows dropped
+
+
+def test_parse_glossary_csv_keeps_legit_punctuation_and_ja_normalizations():
+    # The quote-only filter is surgical: it must NOT drop legitimate rows whose value is plain
+    # punctuation (``？？？``->``???`` is a real DQX placeholder name) or a JA->JA speech
+    # normalization (``ワガハイ``->``わがはい`` feeds cleaner Japanese to MT).
+    csv = "？？？,???\n（）,()\nワガハイ,わがはい\nでアール,である\n"
+    rows = parse_glossary_csv(csv)
+    assert ("？？？", "???") in rows
+    assert ("（）", "()") in rows
+    assert ("ワガハイ", "わがはい") in rows
+    assert ("でアール", "である") in rows
+    assert len(rows) == 4
+
+
+def test_glossify_no_longer_injects_quotes_on_common_ending():
+    # End-to-end regression: the poisoned row, once filtered, leaves the common sentence ending
+    # untouched instead of replacing it with quotes.
+    from dqxclarity.translate.glossary import Glossary
+
+    poisoned = Glossary(parse_glossary_csv('と頼まれた。,""""""\nスライム,Slime\n'))
+    assert poisoned.glossify("スライムと頼まれた。") == "Slime と頼まれた。"
+    assert '"' not in poisoned.glossify("と頼まれた。")
+
+
 def test_save_load_roundtrip(tmp_path):
     # save_glossary writes ``ja,en`` rows that parse_glossary_csv reads back unchanged for normal
     # rows (no embedded commas — the real upstream glossary keys/values).
