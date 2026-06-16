@@ -18,7 +18,7 @@ from .db import TranslationCache, rank_of
 from .glossary import Glossary, glossify
 from .providers.base import Provider
 from .romanize import romanize
-from .tags import protect_tags, restore_tags
+from .tags import protect_tags, restore_tags, shield_name
 
 # Honorifics the game's font/MT mangle when glued onto a name. Mirrors upstream's honorific list in
 # translate.py:318 (__api_translate's name-tag honorific strip). Upstream strips these where they
@@ -164,6 +164,77 @@ class Translator:
             text = pat.sub(r"\1", text)
         return text
 
+    def _shield_names(self, text: str) -> str:
+        """Replace each literal player/sibling JA name with its MT-proof EN-name sentinel (GAP #25).
+
+        The player's/sibling's LITERAL Japanese name appears inline in ordinary game text (e.g.
+        ``タイカンは3600ゴールドを手に入れた！`` = "<name> received 3600 Gold!"). _strip_name_honorifics
+        removes a trailing honorific but leaves the bare NAME exposed, and that bare JA name is then
+        corrupted two ways on the MT path:
+          1. glossify does naive substring substitution — a glossary term ``イカ`` -> "Squid" matches
+             *inside* the name タ-**イカ**-ン, so ``glossify('タイカン')`` becomes ``'タ Squid ン'`` and MT
+             reads it as "Squid Tan".
+          2. the machine translator mangles the bare name itself (``タイカン`` -> "Taycan"/"Tycoon").
+        So we swap each literal JA-name occurrence for the correct EN name wrapped in the name-shield
+        sentinel (:func:`shield_name`, the same SENTINEL+word+SENTINEL trick the sibling word uses).
+        glossify and MT then see the opaque sentinel — never the JA name, so they can't substring-
+        match inside it or re-translate it — and :func:`restore_tags` un-wraps it back to the plain
+        EN name on the way out.
+
+        ORDER: this runs AFTER _strip_name_honorifics (the honorific is already gone, so the bare
+        name is what's exposed) and BEFORE protect_tags/glossify (so glossify never sees the JA name).
+
+        Boundary-safety mirrors _strip_name_honorifics: a name preceded by another Japanese word
+        character (i.e. mid-word) is left untouched via the same negative lookbehind, so we only
+        shield a *standalone* name occurrence. We process the LONGER name first so that when one
+        name is a substring of the other we don't partially replace the longer name. No-op when both
+        JA names are empty (the common case — names unknown until the PLAYER hook fires).
+        """
+        if not self.player_name_ja and not self.sibling_name_ja:
+            return text
+        # (ja, en) pairs for whichever names are known, longest JA first so a name that contains the
+        # other as a substring is shielded whole before the shorter one can partial-match inside it.
+        pairs = [
+            (self.player_name_ja, self.player_name_en),
+            (self.sibling_name_ja, self.sibling_name_en),
+        ]
+        pairs = [(ja, en) for ja, en in pairs if ja]
+        pairs.sort(key=lambda p: len(p[0]), reverse=True)
+        for ja_name, en_name in pairs:
+            # Fall back to the JA name if no EN is known yet (still better behind a sentinel: MT
+            # can't mangle it and glossify can't substring-match inside it).
+            replacement = shield_name(en_name or ja_name)
+            # Same boundary-safe negative lookbehind as _honorific_patterns_for: don't fire when the
+            # name is the TAIL of a longer Japanese word (preceded by hiragana/katakana/CJK or the
+            # prolonged-sound/iteration marks). A standalone name — at string start, after a space,
+            # or after non-Japanese punctuation/digits — is shielded.
+            pattern = re.compile(
+                r"(?<![ぁ-んァ-ヴ一-鿿ーヽヾ々])" + re.escape(ja_name)
+            )
+            text = pattern.sub(lambda _m, r=replacement: r, text)
+        return text
+
+    def _prepare_for_mt(self, ja: str) -> str:
+        """Build the MT-input string shared by the sync and background paths (single source of truth).
+
+        Pipeline order, each step justified inline at its definition:
+          1. _strip_name_honorifics — drop a honorific glued onto the known name (GAP #24).
+          2. _shield_names — swap the now-bare literal JA name for its MT-proof EN-name sentinel
+             (GAP #25) so glossify/MT can't substring-match inside it or re-translate it.
+          3. protect_tags — swap the 40+ variable/color/sibling tags to MT-proof sentinels (#14).
+          4. glossify — pin proper nouns to canonical English (translate.py:220-221).
+        Factored into one helper so the sync ``translate_now`` and the background ``_run`` worker
+        apply IDENTICAL pre-MT processing (they previously inlined the same chain; the name shield
+        must be on BOTH call sites). restore_tags on the MT output un-wraps every sentinel above.
+        """
+        return glossify(
+            protect_tags(
+                self._shield_names(self._strip_name_honorifics(ja)),
+                self.sibling_relationship,
+            ),
+            self.glossary,
+        )
+
     def translate_now(self, ja: str) -> str | None:
         """Synchronous fast translate for first-view; enqueues a background quality upgrade.
 
@@ -176,19 +247,12 @@ class Translator:
             return hit
         if self.sync_provider is None:
             return None
-        # Strip an honorific glued onto the known player/sibling name BEFORE MT (GAP #24,
-        # translate.py:316-321) so the provider doesn't translate it into "-sama"/"Mr.", then
-        # glossify the JA *only* on the way INTO the machine translator (translate.py:220-221) so it
-        # sees canonical proper nouns. The cache stays keyed on the original ``ja`` (the key the game
-        # presents), so the next lookup/community hit still matches and is never re-glossified.
-        # Protect 40+ variable/color tags (and resolve <kyodai_rel*> to the English sibling word)
-        # by swapping them to MT-proof sentinels BEFORE glossify/MT, then restore after (#14,
-        # translate.py:323-328). Done after honorific-strip / before glossify so the protected
-        # text still gets canonical proper nouns, and the sentinels keep the tags out of MT's reach.
-        src = glossify(
-            protect_tags(self._strip_name_honorifics(ja), self.sibling_relationship),
-            self.glossary,
-        )
+        # Build the MT-input string: strip the name honorific (GAP #24), shield the literal player/
+        # sibling name behind an MT-proof EN-name sentinel (GAP #25), protect the 40+ variable/color
+        # tags (#14), then glossify proper nouns (translate.py:220-221) — see _prepare_for_mt for the
+        # full ordering rationale. The cache stays keyed on the original ``ja`` (the key the game
+        # presents), so the next lookup/community hit still matches and is never re-processed.
+        src = self._prepare_for_mt(ja)
         try:
             res = self.sync_provider.translate([src])
         except Exception:  # noqa: BLE001 - never propagate into the game thread
@@ -260,17 +324,12 @@ class Translator:
             batch = self._drain_batch()
             if not batch:
                 continue
-            # Strip name honorifics (GAP #24, translate.py:316-321) then glossify each JA before the
-            # slow MT call (same point as the sync path / upstream __api_translate,
-            # translate.py:220-221) while caching under the original keys in ``batch`` so
-            # cache/community lookups still match.
-            to_translate = [
-                glossify(
-                    protect_tags(self._strip_name_honorifics(ja), self.sibling_relationship),
-                    self.glossary,
-                )
-                for ja in batch
-            ]
+            # Same pre-MT processing as the sync path (_prepare_for_mt: honorific strip GAP #24,
+            # name shield GAP #25, tag protect #14, glossify translate.py:220-221) so the slow
+            # provider gets identical input — the name shield MUST be applied here too, not just on
+            # the sync path. Cache under the original keys in ``batch`` so cache/community lookups
+            # still match.
+            to_translate = [self._prepare_for_mt(ja) for ja in batch]
             try:
                 results = bg.translate(to_translate)
             except Exception:  # noqa: BLE001 - provider must not kill the worker

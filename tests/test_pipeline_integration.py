@@ -284,8 +284,13 @@ def test_translate_now_strips_name_honorific_before_mt(tmp_path):
     sync = StubProvider("googletranslatefree", transform)
     t = Translator(c, sync_provider=sync)
     t.player_name_ja = "タイカン"                          # the live player name
+    t.player_name_en = "Taikan"                           # EN name used by the name shield (GAP #25)
     t.translate_now("タイカンさま、こんにちは")
-    assert seen == ["タイカン、こんにちは"]                # honorific さま dropped before MT
+    # honorific さま dropped before MT (GAP #24); the now-bare name is then shielded behind the
+    # MT-proof EN-name sentinel (GAP #25) so glossify/MT can't touch it. <&7_ab> is shield_name's
+    # sentinel; the surrounding text is otherwise unchanged.
+    from dqxclarity.translate.tags import shield_name
+    assert seen == [f"{shield_name('Taikan')}、こんにちは"]
     c.close()
 
 

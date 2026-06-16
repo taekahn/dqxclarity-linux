@@ -175,9 +175,12 @@ def test_translate_now_strips_honorific_before_provider(tmp_path):
     prov = _StubProvider("Taikan")
     t = Translator(c, sync_provider=prov)
     t.player_name_ja = "タイカン"  # タイカン
+    t.player_name_en = "Taikan"  # EN name used by the name shield (GAP #25)
     t.translate_now("タイカンさま")  # タイカンさま (cache miss -> MT)
-    # The honorific was stripped from the JA the provider actually received.
-    assert prov.seen == ["タイカン"]  # タイカン (no さま)
+    # The honorific さま was stripped (GAP #24), and the now-bare name is shielded behind the
+    # MT-proof EN-name sentinel (GAP #25) so glossify/MT never see the raw JA name.
+    from dqxclarity.translate.tags import shield_name
+    assert prov.seen == [shield_name("Taikan")]  # さま gone; name shielded
     c.close()
 
 
@@ -192,6 +195,7 @@ def test_run_strips_honorific_before_upgrade_provider(tmp_path):
     upgrade.name = "claude_cli"  # rank 2, so it upgrades the rank-1 entry
     t = Translator(c, upgrade_provider=upgrade)
     t.player_name_ja = "タイカン"  # タイカン
+    t.player_name_en = "Taikan"  # EN name used by the name shield (GAP #25)
     t.start()
     try:
         t.request_upgrade(ja)  # queue the JA-with-honorific for background re-translation
@@ -200,6 +204,8 @@ def test_run_strips_honorific_before_upgrade_provider(tmp_path):
             time.sleep(0.02)
     finally:
         t.stop()
-    # The honorific was stripped from the JA the upgrade provider actually received.
-    assert upgrade.seen == ["タイカン"]  # タイカン (no さま)
+    # The honorific さま was stripped (GAP #24) and the now-bare name is shielded behind the
+    # MT-proof EN-name sentinel (GAP #25) on the BACKGROUND path too (it shares _prepare_for_mt).
+    from dqxclarity.translate.tags import shield_name
+    assert upgrade.seen == [shield_name("Taikan")]  # さま gone; name shielded
     c.close()

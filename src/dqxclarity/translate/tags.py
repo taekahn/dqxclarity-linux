@@ -82,6 +82,28 @@ _KYODAI_REL_SENTINEL = "<&7_aa>"  # matches upstream's <kyodai_rel1> sentinel bo
 _SIBLING_WORD = {1: "brother", 2: "brother", 3: "sister", 4: "sister"}
 _SIBLING_DEFAULT = "sibling"
 
+# Proper-name shield sentinel. The player's/sibling's LITERAL Japanese name can appear inline in
+# game text (e.g. "タイカンは3600ゴールドを手に入れた！" = "<name> received 3600 Gold!"). If that bare
+# JA name reaches glossify it can substring-match a glossary term *inside* the name (a term イカ ->
+# "Squid" matches in タ-イカ-ン, yielding "タ Squid ン" -> "Squid Tan"); and if it reaches MT, the
+# translator mangles the name itself (タイカン -> "Taycan"/"Tycoon"). So before glossify/MT we swap
+# each literal JA name occurrence for the correct EN name wrapped in this sentinel — the SAME
+# pattern _KYODAI_REL_SENTINEL uses for the sibling word. MT then preserves the EN word untouched
+# and :func:`restore_tags` un-wraps it back to the plain EN name. A distinct suffix letter ("ab")
+# keeps its tolerant restore pattern from colliding with the sibling-word sentinel ("aa").
+_NAME_SHIELD_SENTINEL = "<&7_ab>"
+
+
+def shield_name(name_en: str) -> str:
+    """Wrap an English name in the MT-proof name-shield sentinel (``SENTINEL+name+SENTINEL``).
+
+    Mirrors how :func:`protect_tags` wraps the resolved sibling word: the sentinel halves bracket
+    the chosen English word so MT preserves it verbatim and :func:`restore_tags` un-wraps it. Used
+    by the pipeline's name-protection step to swap a literal JA name for its shielded EN name before
+    glossify/MT can touch the raw JA name.
+    """
+    return f"{_NAME_SHIELD_SENTINEL}{name_en}{_NAME_SHIELD_SENTINEL}"
+
 
 def sibling_word(relationship: int | None) -> str:
     """Resolve a login relationship byte to its English sibling word.
@@ -199,6 +221,21 @@ _KYODAI_REL_RESTORE = re.compile(
 # than leaking the raw sentinel into the rendered string.
 _KYODAI_REL_STRAY = re.compile(_KYODAI_HALF, re.IGNORECASE)
 
+# Tolerant name-shield restore: <&7_ab>Name<&7_ab> -> Name. Mirrors the sibling-word restore but
+# captures the wrapped EN name *non-greedily across spaces* (a name may be two words, e.g.
+# "Taikan the Brave"), so the inner group is ``.+?`` rather than ``\w+``. The two sentinel halves
+# are distinctive opaque ASCII, so a lazy ".+?" between them can't over-match into surrounding text.
+_NAME_SHIELD_HALF = r"(?:<\s*|(?<!<))&\s*7\s*_\s*a\s*b\s*>"
+_NAME_SHIELD_RESTORE = re.compile(
+    # DOTALL so the lazy inner capture survives an MT-injected newline INSIDE the name (DQX dialogue
+    # names can land mid-line); still lazy, so adjacent shielded names pair to their nearest sentinel.
+    _NAME_SHIELD_HALF + r"\s*(.+?)\s*" + _NAME_SHIELD_HALF,
+    re.IGNORECASE | re.DOTALL,
+)
+# Defensive: a stray name-shield half (MT dropped one side) collapses to nothing rather than
+# leaking the raw sentinel into the rendered string — same treatment as the sibling-word stray.
+_NAME_SHIELD_STRAY = re.compile(_NAME_SHIELD_HALF, re.IGNORECASE)
+
 
 def restore_tags(text: str) -> str:
     """Swap MT-proof sentinels back to their original game tags (typo-tolerant).
@@ -209,7 +246,14 @@ def restore_tags(text: str) -> str:
 
     Pure. Safe on text that never went through :func:`protect_tags` (returns it unchanged).
     """
-    # Sibling word first: collapse <&7_aa>word<&7_aa> -> word, then mop up any stray half-sentinel.
+    # Name shield first: collapse <&7_ab>Name<&7_ab> -> Name, then mop up any stray half-sentinel.
+    # Done before the sibling-word restore so the two distinct sentinels never interfere; each has a
+    # different suffix letter (ab vs aa) so their tolerant patterns don't overlap. (The lazy inner
+    # ".+?" makes this the more aggressive matcher, so resolving the fully-paired name shields first
+    # is cleanest.)
+    text = _NAME_SHIELD_RESTORE.sub(r"\1", text)
+    text = _NAME_SHIELD_STRAY.sub("", text)
+    # Sibling word: collapse <&7_aa>word<&7_aa> -> word, then mop up any stray half-sentinel.
     text = _KYODAI_REL_RESTORE.sub(r"\1", text)
     text = _KYODAI_REL_STRAY.sub("", text)
     # Fixed placeholder sentinels -> original tags.
