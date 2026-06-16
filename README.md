@@ -7,12 +7,12 @@ See [`PLAN.md`](PLAN.md) for the full design, decisions, and Phase 0 spike resul
 
 ## Status
 
-- **Phase 0 (spike): done** — native memory read/write of the live (32-bit, WOW64) game proven
-  via `process_vm_readv`/`writev` with no elevation; `rwxp` code caves present (native detour
-  hooking viable).
-- **Phase 1 (this MVP): static file patching** — install detection, manifest-driven download +
-  verify + atomic replace with timestamped backups and a game-running safety block.
-- **Phase 2+**: AOB scanner + signatures, then live translation (DB-cached + MT providers).
+- **Static file patching** — install detection, manifest-driven download + verify + atomic replace
+  with timestamped backups and a game-running safety block.
+- **Live translation** — native in-process detour hooks on all surfaces (dialogue, quests,
+  walkthrough, corner text, overhead/party names, network text, player names), backed by the curated
+  community DB, a ~40k-term proper-noun glossary, and an optional two-tier MT fallback (fast Google
+  first-view + background **Claude** upgrade via your subscription CLI or the metered API).
 
 ## Install
 
@@ -24,48 +24,76 @@ pip install -e '.[dev]'      # + dev tools (pytest, ruff) — needed to run the 
 
 Live translation uses native in-process hooking (no Frida). Run the tests with `pytest`.
 
+## Run
+
+The everyday flow — detect your install, pull the community translations, then translate live:
+
+```sh
+dqxclarity doctor     # preflight: install detection, paths, permissions, deps
+dqxclarity sync       # download the curated community DB + proper-noun glossary (run periodically)
+dqxclarity run        # live-translate every surface while the game is open (Ctrl-C to stop)
+```
+
+`run` attaches to the running game, installs native detour hooks on all surfaces, and writes English
+back in place — restoring the game's original bytes on exit. The game must be **open**; launch DQX
+once first so your install is auto-detected. Want machine translation for the tail the community DB
+doesn't cover (including higher-quality Claude)? See [Live translation](#live-translation).
+
 ## Usage
 
 ```sh
 dqxclarity doctor                 # preflight: install detection, paths, permissions, deps
+dqxclarity run                    # live-translate all surfaces (dialogue, quests, names, …) at once
+dqxclarity run --hooks dialogue   # or just specific surfaces
+dqxclarity sync                   # download the curated community DB + proper-noun glossary
 dqxclarity probe                  # inspect the running game + live memory-read smoke test
+dqxclarity scan                   # find/read Japanese text in the live game (diagnostic)
 dqxclarity patch --dry-run        # show what file patching would change
 dqxclarity patch                  # apply translated UI/menu archive (game must be CLOSED)
 dqxclarity patch --config --launcher   # also patch DQXConfig.exe + DQXLauncher.exe
 dqxclarity restore                # roll back to the most recent backup
-dqxclarity scan                   # find/read Japanese text in the live game (diagnostic)
 dqxclarity romanize "たろう"       # local JP->romaji demo (no game needed)
-dqxclarity sync                   # download the curated community dialogue dataset (~4k+ lines)
-dqxclarity run                    # live-translate all surfaces (dialogue, quests, names, …) at once
-dqxclarity run --hooks dialogue   # or just specific surfaces
 dqxclarity send-text "ごめんね"     # inject text into the open chat box (Linux IME bypass)
 dqxclarity translate-text "…"     # translate one string via the configured provider
 dqxclarity config show
 dqxclarity config set install_root "/path/to/DRAGON QUEST X"
-dqxclarity config set patch.manifest_url https://example/manifest.json
-dqxclarity config set translate.provider claude_cli   # optional MT for uncovered text
+dqxclarity config set translate.provider googletranslatefree     # fast first-view MT
+dqxclarity config set translate.upgrade_provider claude          # background Claude upgrade (API or CLI)
 ```
 
-## Live translation (Phase 3a)
+## Live translation
 
-Live translation intercepts Japanese the game shows, looks it up, and writes English back. The
-sources, in order: (1) the **curated community DB** (human translations — the bulk), (2) local
+Live translation intercepts Japanese the game shows, looks it up, and writes English back. Sources,
+in priority order: (1) the **curated community DB** (human translations — the bulk), (2) local
 **romaji** for player/NPC names via `pykakasi` (in-process, no service), and (3) an **optional MT
-provider** only for the leftover untranslated tail. Each unique string is translated once and
-cached forever (in-memory dict + SQLite-WAL).
+provider** for the leftover untranslated tail. Each unique string is translated once and cached
+forever (in-memory dict + SQLite-WAL). A ~40k-term **proper-noun glossary** keeps names, places, and
+skills consistent across every MT call.
 
 **Two-tier MT** (both optional, off by default):
 - `translate.provider` — a **fast, synchronous** translator for instant first-view (e.g.
   `googletranslatefree`: free Google, no key, ~200ms).
-- `translate.upgrade_provider` — a **slow, higher-quality** translator (e.g. `claude_cli`, your
-  Claude subscription) that runs in the **background and upgrades** the cache, so a re-viewed line
-  shows the better translation. Quality only ever increases (community > claude > google); the
+- `translate.upgrade_provider` — a **slow, higher-quality** translator that runs in the **background
+  and upgrades** the cache, so a re-viewed line shows the better translation. Set it to **`claude`**
+  to auto-resolve the best available transport:
+  - the **Anthropic API** when `ANTHROPIC_API_KEY` is set (lightweight, metered) — with per-item
+    fallback to the CLI if a call fails;
+  - the **Claude Code CLI** (your subscription) when no key is present.
+
+  (`claude_cli` / `claude_api` force one transport.) Claude receives rich context — the glossary as
+  canonical pins, your character names, the current draft, and a per-surface register hint — so the
+  output reads like proper in-game English. Quality only ever increases (community > claude > google);
   curated human translations are never overwritten.
 
 ```sh
 dqxclarity config set translate.provider googletranslatefree   # instant first-view
-dqxclarity config set translate.upgrade_provider claude_cli     # background quality upgrade
+dqxclarity config set translate.upgrade_provider claude         # background quality upgrade
+set -x ANTHROPIC_API_KEY sk-ant-...   # optional: route Claude through the metered API (fish syntax)
 ```
+
+> The API key lives in the `ANTHROPIC_API_KEY` environment variable, **never** in `config.toml`
+> (that file is meant to be shareable). The metered cost is tiny — the community DB covers the vast
+> majority of text, so only the small uncovered tail ever reaches Claude.
 
 ### Dialogue (community DB + name placeholders)
 
