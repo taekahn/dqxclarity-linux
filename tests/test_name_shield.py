@@ -271,3 +271,58 @@ def test_leading_prefix_sibling_longer_first_no_corruption(tmp_path):
     assert "カン" not in sent and "カンタ" not in sent  # shielded whole, not split into カン + タ
     assert out == "Kanta"
     c.close()
+
+
+# --- invariants that would silently regress (added 2026-06-15) ------------------------------- #
+
+
+def test_cache_key_stays_literal_ja_not_shielded(tmp_path):
+    """CRITICAL invariant: the cache is keyed on the ORIGINAL literal ja the game presents — the
+    shield must NOT leak into the key, or a later lookup / community hit for that ja would miss."""
+    prov = _EchoProvider()
+    c = TranslationCache(tmp_path / "key.db")
+    t = Translator(c, sync_provider=prov)
+    t.player_name_ja, t.player_name_en = "タイカン", "Taikan"
+    ja = "タイカンは3600ゴールドを手に入れた！"
+    t.translate_now(ja)
+    # a lookup with the EXACT literal ja hits (key unchanged); the stored value has no sentinel leak.
+    hit = c.lookup(ja)
+    assert hit is not None
+    assert "<&7" not in hit and "&7_ab" not in hit
+    # and the shielded form was NOT used as a key.
+    from dqxclarity.translate.tags import shield_name
+    assert c.lookup(ja.replace("タイカン", shield_name("Taikan"))) is None
+    c.close()
+
+
+def test_player_and_sibling_in_one_string_both_restore_no_sentinel_leak(tmp_path):
+    """Two DIFFERENT shielded names in one string must each pair to their OWN sentinels (the lazy-
+    restore risk) and leave no raw sentinel in the output. Separated by a fullwidth space (　, common
+    in DQX) so both clear the boundary lookbehind and get shielded. (A name after a *particle* like と
+    is a known un-shielded gap — see the mid-sentence task — NOT exercised here.)"""
+    prov = _EchoProvider()
+    c = TranslationCache(tmp_path / "two.db")
+    t = Translator(c, sync_provider=prov)
+    t.player_name_ja, t.player_name_en = "タイカン", "Taikan"
+    t.sibling_name_ja, t.sibling_name_en = "きみこ", "Kimiko"
+    out = t.translate_now("タイカン　きみこ")
+    sent = prov.seen[0]
+    assert "タイカン" not in sent and "きみこ" not in sent  # both names shielded before MT
+    assert "Taikan" in out and "Kimiko" in out             # both restored to their own EN names
+    assert "<&7" not in out and "&7_ab" not in out         # no raw sentinel leaked to render
+    c.close()
+
+
+def test_cache_hit_bypasses_shield_and_mt(tmp_path):
+    """The shield is MT-ONLY: a cache/community hit is returned verbatim and never re-shielded or
+    re-translated. Guards against a future change accidentally running curated text through MT."""
+    prov = _EchoProvider()
+    c = TranslationCache(tmp_path / "hit.db")
+    t = Translator(c, sync_provider=prov)
+    t.player_name_ja, t.player_name_en = "タイカン", "Taikan"
+    ja = "タイカンは3600ゴールドを手に入れた！"
+    c.store(ja, "Taikan received 3600 Gold!", "community")  # a curated hit, already correct
+    out = t.translate_now(ja)
+    assert out == "Taikan received 3600 Gold!"  # returned the hit verbatim
+    assert prov.seen == []                       # the MT/shield path never ran
+    c.close()
