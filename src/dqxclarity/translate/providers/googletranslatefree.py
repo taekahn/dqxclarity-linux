@@ -18,10 +18,11 @@ import httpx
 # The free endpoint flakes intermittently — it returns a page with NO result-container (or rate-limits
 # with an HTTP error) on a request that succeeds moments later. This is especially common on glossified
 # mixed Japanese+English input (a glossary term like 駅->"train station" injected into JA confuses it).
-# A couple of quick retries turn those transient empties into a hit; a genuinely empty result-container
-# is returned as-is (no retry). Kept small so a real outage still fails fast (the caller leaves the text
-# Japanese and the surface re-fires on the next view).
-_ATTEMPTS = 3
+# One quick retry turns the common transient empty into a hit; a genuinely empty result-container is
+# returned as-is (no retry). Kept SMALL on purpose — this is the sync first-view path, so we don't want
+# to block the game thread chasing a flaky endpoint. Anything still missed is leftover-Japanese that
+# the async background upgrade (Claude, when enabled) re-translates at higher quality on a later pass.
+_ATTEMPTS = 2  # i.e. 1 retry
 _RETRY_BACKOFF = 0.25
 
 _RESULT_RE = re.compile(r'<div class="result-container">(.*?)</div>', re.DOTALL)
