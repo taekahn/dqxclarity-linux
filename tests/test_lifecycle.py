@@ -258,7 +258,7 @@ def run_env(monkeypatch):
 
     import dqxclarity.runtime.dispatch as dispatch_mod
 
-    def fake_serve(mem, installed, *, stop, game_gone=None, on_line=None):
+    def fake_serve(mem, installed, *, stop, game_gone=None, on_line=None, profiler=None):
         state["serves"] += 1
         action = state["serve_script"].pop(0)
         return action(stop, game_gone)
@@ -280,7 +280,7 @@ def run_env(monkeypatch):
         def stop_and_join(self, timeout=None):
             state["scanner_stops"] += 1
 
-    def fake_start_scanner(mem, translator, *, enabled, interval=1.0, on_write=None):
+    def fake_start_scanner(mem, translator, *, enabled, interval=1.0, on_write=None, profiler=None):
         state["scanner_starts"].append({"mem": mem, "enabled": enabled, "interval": interval})
         return _FakeScanner(enabled)
 

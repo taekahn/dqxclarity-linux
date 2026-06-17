@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import struct
 import threading
+import time
 
 from ..translate import romanize
 from ..translate.dialogue import translate_conversation
@@ -633,7 +634,7 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
 
 def serve(
     mem, hooks, *, stop: threading.Event, on_line=None,
-    game_gone: threading.Event | None = None,
+    game_gone: threading.Event | None = None, profiler=None,
 ) -> int:
     """Poll all ``(name, hook, fn)`` triples until ``stop`` is set.
 
@@ -658,11 +659,30 @@ def serve(
         True. We skip just that hook for this tick and keep serving (one bad read must not crash us).
     """
     served = 0
+    # --profile: time each real serve (the game-thread block) and the gap between loop iterations
+    # (a big gap = the loop was starved, e.g. the name scanner held the GIL through a heavy scan, so
+    # the game waited that long for its reply). Imported lazily so the non-profiled path stays clean.
+    if profiler is not None:
+        from .profile import SLOW_S
+        last_iter = time.monotonic()
     while not stop.is_set():
+        if profiler is not None:
+            now = time.monotonic()
+            gap = now - last_iter
+            last_iter = now
+            if gap >= SLOW_S:
+                profiler.record("loop", "serve", gap)
         idle = True
         for name, hook, translate_fn in hooks:
             try:
-                ja = hook.serve_once(mem, translate_fn)
+                if profiler is not None:
+                    t = time.monotonic()
+                    ja = hook.serve_once(mem, translate_fn)
+                    dt = time.monotonic() - t
+                    if ja is not None or dt >= SLOW_S:  # real work, or a slow no-op read
+                        profiler.record("serve", name, dt, "served" if ja is not None else "")
+                else:
+                    ja = hook.serve_once(mem, translate_fn)
             except (struct.error, OSError):
                 # A read failed. Distinguish "game is gone" from a one-off blip with a cheap probe.
                 if not mem.is_alive():

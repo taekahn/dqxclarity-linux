@@ -505,7 +505,7 @@ def _run_capture_installed(monkeypatch, *, hook_names, suppressions):
 
     captured = {}
 
-    def _fake_serve(mem, installed, *, stop, game_gone=None, on_line=None):
+    def _fake_serve(mem, installed, *, stop, game_gone=None, on_line=None, profiler=None):
         captured["installed"] = installed
         return 0
 
@@ -593,7 +593,7 @@ def test_cli_run_missing_suppression_snapshot_degrades(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "dqxclarity.runtime.dispatch.serve",
-        lambda mem, installed, *, stop, game_gone=None, on_line=None:
+        lambda mem, installed, *, stop, game_gone=None, on_line=None, profiler=None:
             captured.__setitem__("installed", installed) or 0,
     )
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config())

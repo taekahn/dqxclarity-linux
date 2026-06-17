@@ -74,6 +74,7 @@ def start_scanner(
     enabled: bool,
     interval: float = 1.0,
     on_write=None,
+    profiler=None,
 ) -> ScannerHandle:
     """Start the polling name scanner as a DAEMON thread for ONE game attach, return a handle.
 
@@ -96,7 +97,7 @@ def start_scanner(
     thread = threading.Thread(
         target=run,
         args=(mem, translator),
-        kwargs={"stop": stop, "interval": interval, "on_write": on_write},
+        kwargs={"stop": stop, "interval": interval, "on_write": on_write, "profiler": profiler},
         name="name-scanner",
         daemon=True,  # never block process exit on it; run() always stop+joins it explicitly anyway
     )
@@ -111,6 +112,7 @@ def run(
     stop: threading.Event,
     interval: float = 1.0,
     on_write=None,
+    profiler=None,
 ) -> LoopStats:
     """Run until ``stop`` is set. Returns accumulated stats.
 
@@ -164,6 +166,7 @@ def run(
             stop.wait(interval)
             continue
 
+        _t_scan = time.monotonic() if profiler is not None else 0.0
         all_hits: list[int] = []  # every match address found this pass, for warm-set recomputation
         if do_full:
             stats.full_scans += 1
@@ -206,6 +209,12 @@ def run(
                         stats.samples.append((ja, en))
                     if on_write:
                         on_write(ja, en)
+
+        if profiler is not None:
+            profiler.record(
+                "namescan", "full" if do_full else "warm", time.monotonic() - _t_scan,
+                f"regions={len(scan_regions)} hits={len(all_hits)}",
+            )
 
         # ---- refresh state from this pass's results ----------------------------------------- #
         # (c) Zone-change rediscovery: a warm-only pass that came up empty means the buffers we were

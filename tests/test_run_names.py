@@ -43,7 +43,7 @@ def test_start_scanner_enabled_starts_thread_with_mem_and_translator(monkeypatch
     seen = {}
     started = threading.Event()
 
-    def fake_run(mem, translator, *, stop, interval, on_write):
+    def fake_run(mem, translator, *, stop, interval, on_write, profiler=None):
         seen["mem"] = mem
         seen["translator"] = translator
         seen["interval"] = interval
@@ -95,7 +95,7 @@ def test_stop_and_join_sets_event_and_joins(monkeypatch):
     """stop_and_join sets the private event (unblocking names_loop.run) and joins the thread."""
     ran_to_completion = threading.Event()
 
-    def fake_run(mem, translator, *, stop, interval, on_write):
+    def fake_run(mem, translator, *, stop, interval, on_write, profiler=None):
         stop.wait()             # the real loop blocks until stop is set
         ran_to_completion.set()  # reached only once stop is set -> proves join saw a clean exit
 

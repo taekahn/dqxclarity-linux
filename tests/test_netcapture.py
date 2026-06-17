@@ -185,7 +185,7 @@ def test_run_capture_network_installs_capture_fn_and_dumps_report(run_env, tmp_p
     import dqxclarity.runtime.dispatch as dispatch_mod
     fixture_serve = dispatch_mod.serve  # already the run_env fixture's fake_serve
 
-    def capturing_serve(mem, installed, *, stop, game_gone=None, on_line=None):
+    def capturing_serve(mem, installed, *, stop, game_gone=None, on_line=None, profiler=None):
         for name, _hook, fn in installed:
             if name == "network_text":
                 captured_fn["fn"] = fn

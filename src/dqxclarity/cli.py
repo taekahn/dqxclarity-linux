@@ -881,6 +881,13 @@ def run(
              "diagnostic. Default is QUIET: the startup summary plus key events (game closed, "
              "errors, exit) only.",
     ),
+    profile: bool = typer.Option(
+        False, "--profile",
+        help="Diagnose game-thread hitches: time each serve_once (per surface), each name-scanner "
+             "pass (warm/full), and serve-loop starvation gaps. Logs slow events (>=30ms) live with "
+             "a timestamp so a periodic spike's cadence is visible, and prints a per-component "
+             "summary on exit. Use to pinpoint a recurring lag spike.",
+    ),
 ) -> None:
     """Live-translate all enabled text surfaces (dialogue, quests, …) in the running game.
 
@@ -1088,6 +1095,19 @@ def run(
     user_quit = False
     first_iteration = True
     total_served = 0
+    # --profile: one Profiler spanning all attaches (like the translator). Live-logs slow events
+    # (>=30ms) with a timestamp so a periodic hitch's cadence is visible; summary printed on exit.
+    profile_on = profile if isinstance(profile, bool) else False
+    profiler = None
+    if profile_on:
+        from .runtime.profile import Profiler
+
+        profiler = Profiler(
+            on_slow=lambda ts, kind, label, ms, detail: console.print(
+                f"[magenta][prof {ts:6.1f}s][/] {kind}:{label} [bold]{ms:.0f}ms[/] {detail}"
+            )
+        )
+        console.print("  [magenta]profiling on[/] — slow events (>=30ms) logged live; summary on exit")
     try:
         while True:
             if first_iteration:
@@ -1190,6 +1210,7 @@ def run(
                     mem, translator, enabled=names_on, interval=interval,
                     on_write=(lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"))
                     if verbose_on else None,
+                    profiler=profiler,
                 )
                 # --- NOTICE SCANNER (per-attach daemon thread) ------------------------------------- #
                 # Same per-attach, private-stop lifecycle as the name scanner (see above): the startup
@@ -1212,6 +1233,7 @@ def run(
                         on_line=(lambda name, ja: console.print(
                             f"  [dim]{name}[/] {ja.splitlines()[0][:60]!r}"
                         )) if verbose_on else None,
+                        profiler=profiler,
                     )
                 except KeyboardInterrupt:
                     user_quit = True
@@ -1248,6 +1270,14 @@ def run(
                 f"[green]captured[/] {report['totals']['calls']} calls across "
                 f"{report['totals']['categories']} categories → {out_path}"
             )
+        # PROFILE summary: per-component timing + the detected hitch cadence (every exit path).
+        if profiler is not None:
+            console.print(profiler.summary_table())
+            hint = profiler.cadence_hint()
+            if hint:
+                console.print(f"[magenta]hitch cadence:[/] {hint}")
+            else:
+                console.print("[dim]no hitches >=30ms recorded.[/]")
     console.print(f"[green]restored.[/] served {total_served} text fields.")
 
 
