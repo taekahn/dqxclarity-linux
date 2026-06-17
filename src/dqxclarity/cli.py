@@ -1290,7 +1290,7 @@ def run(
                 ((n, getattr(h, "requests", 0)) for n, h, _ in installed),
                 key=lambda r: r[1], reverse=True,
             )
-            if any(r[1] for r in hook_rows):
+            if hook_rows:  # always print (even all-zero) so an idle hook is explicit, not just absent
                 console.print("[magenta]hook request rates[/] (hot blocking hook = per-call game stalls):")
                 for name, n in hook_rows:
                     console.print(f"  {name}: {n} reqs ({n / elapsed:.0f}/s)")
