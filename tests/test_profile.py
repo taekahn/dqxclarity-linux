@@ -98,6 +98,36 @@ def test_serve_without_profiler_is_a_noop_path():
     assert serve(None, [("dialogue", hook, None)], stop=stop) == 1
 
 
+def test_serve_idle_poll_backs_off_after_sustained_idle():
+    # The idle poll must stay fast briefly, then back off, so an N-hook poll doesn't hammer the game
+    # with N*1000 process_vm_readv/sec. Drive a deterministic, always-idle loop and capture the waits.
+    class _FakeStop:
+        def __init__(self):
+            self.waits = []
+            self._set = False
+
+        def is_set(self):
+            return self._set
+
+        def set(self):
+            self._set = True
+
+        def wait(self, t):
+            self.waits.append(t)
+            if len(self.waits) >= 130:  # let it run well past the backoff threshold, then stop
+                self._set = True
+
+    class _IdleHook:
+        def serve_once(self, mem, fn):
+            return None  # always idle -> never resets the streak
+
+    stop = _FakeStop()
+    serve(None, [("a", _IdleHook(), None)], stop=stop)
+    assert stop.waits[0] == 0.001      # idle_streak=1 -> fast
+    assert stop.waits[98] == 0.001     # idle_streak=99 -> still fast (responsive window)
+    assert stop.waits[100] == 0.020    # idle_streak=101 -> backed off
+
+
 class _SlowFirstHook:
     """First serve_once sleeps (creating a >SLOW_S loop gap for the next iteration), then stops."""
 

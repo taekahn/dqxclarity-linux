@@ -659,6 +659,7 @@ def serve(
         True. We skip just that hook for this tick and keep serving (one bad read must not crash us).
     """
     served = 0
+    idle_streak = 0  # consecutive all-idle iterations; drives the adaptive poll backoff (below)
     # --profile: time each real serve (the game-thread block) and the gap between loop iterations
     # (a big gap = the loop was starved, e.g. the name scanner held the GIL through a heavy scan, so
     # the game waited that long for its reply). Imported lazily so the non-profiled path stays clean.
@@ -698,5 +699,17 @@ def serve(
                 if on_line:
                     on_line(name, ja)
         if idle:
-            stop.wait(0.001)  # only sleep when nothing is pending (keeps block latency low)
+            # ADAPTIVE POLL BACKOFF. Each iteration does one process_vm_readv PER installed hook to
+            # read its state flag; a tight 1ms poll over N hooks is ~N*1000 cross-process reads/sec,
+            # each briefly taking the game's mmap lock — which contends with the game's own memory ops
+            # and microstutters. The cost scales with hook count (observed: 7 hooks stutter, 1 doesn't,
+            # even with ZERO requests served). So stay fast (1ms) for a short window after any activity
+            # — sequential dialogue segments keep first-view latency low — then back off to 20ms once
+            # sustained-idle (e.g. just running around), cutting the idle read rate ~20x. Worst case is
+            # one 20ms tick of extra latency on the NEXT text appearance (~one frame; the cave's spin
+            # timeout is ~0.5-4s, so a request is never missed). A real request resets the streak.
+            idle_streak += 1
+            stop.wait(0.001 if idle_streak < 100 else 0.020)
+        else:
+            idle_streak = 0
     return served
