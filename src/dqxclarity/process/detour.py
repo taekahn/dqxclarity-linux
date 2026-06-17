@@ -21,7 +21,7 @@ original bytes and `restore()` puts them back. Use on a disposable/backup instal
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .memory_linux import LinuxProcessMemory
 
@@ -262,6 +262,7 @@ class ReturnHook:
     # (struct offset, max writable bytes) — kept for parity with BlockingHook; the network surface
     # reads len/end/category from the context directly, so the default single entry is unused here.
     fields: tuple[tuple[int, int], ...] = ((0, 1 << 20),)
+    requests: int = field(default=0, init=False)  # game-side requests serviced (profiling/hot-hook)
 
     def serve_once(self, mem: LinuxProcessMemory, translate) -> str | None:
         """If a return is pending, translate the produced string and write EN back within ``length``.
@@ -276,6 +277,7 @@ class ReturnHook:
         """
         if mem.read_u32(self.state_addr) != STATE_REQUEST:
             return None
+        self.requests += 1  # a real game-side call is being serviced (hot-hook profiling)
         ja: str | None = None
         try:
             ctx = mem.read_u32(self.ctx_slot)
@@ -372,6 +374,7 @@ class BlockingHook:
     # several tightly-packed fields, so each field's max bytes (the gap to the next) bounds the
     # write to prevent one field's translation overflowing into the next (invariant I1).
     fields: tuple[tuple[int, int], ...] = ((0, _READ_WINDOW),)
+    requests: int = field(default=0, init=False)  # game-side requests serviced (profiling/hot-hook)
 
     def serve_once(self, mem: LinuxProcessMemory, translate) -> str | None:
         """If a request is pending, translate each text field at the captured pointer, write back.
@@ -388,6 +391,7 @@ class BlockingHook:
         """
         if mem.read_u32(self.state_addr) != STATE_REQUEST:
             return None
+        self.requests += 1  # a real game-side call is being serviced (hot-hook profiling)
         router = translate if hasattr(translate, "fn_for") else None
         first_ja: str | None = None
         try:
@@ -488,6 +492,7 @@ class PlayerHook:
     slot_addr: int
     code_addr: int
     saved_bytes: bytes
+    requests: int = field(default=0, init=False)  # game-side login requests serviced (profiling)
 
     @staticmethod
     def _read_cstring(mem: LinuxProcessMemory, addr: int, cap: int = 64) -> str:
@@ -520,6 +525,7 @@ class PlayerHook:
         # nothing and (critically) write NOTHING — the STATE-release below must not run on this path.
         if mem.read_u32(self.state_addr) != STATE_REQUEST:
             return None
+        self.requests += 1  # a real game-side login call is being serviced (hot-hook profiling)
 
         # From here on a request IS pending: we are committed to releasing STATE in the finally, no
         # matter what happens (read error, apply error). `applied` flips True ONLY after a successful

@@ -37,6 +37,10 @@ class Profiler:
         # plain bool read/write is atomic under the GIL — no lock needed for this coarse attribution.
         self.scanning = False
 
+    def elapsed(self) -> float:
+        """Seconds since this profiler was created (for per-hook request-rate reporting)."""
+        return time.monotonic() - self._t0
+
     def record(self, kind: str, label: str, dur_s: float, detail: str = "") -> None:
         key = f"{kind}:{label}"
         a = self.agg.get(key)

@@ -1109,6 +1109,9 @@ def run(
         )
         console.print("  [magenta]profiling on[/] — slow events (>=30ms) logged live; summary on exit")
         translator.profiler = profiler  # so the background MT worker (_run) also records mt:<provider>
+    # Holds the LAST attach's hooks so the exit profile can read each hook's serviced-request count
+    # (initialized here so the finally is safe even if the game never starts).
+    installed: list[tuple[str, object, object]] = []
     try:
         while True:
             if first_iteration:
@@ -1279,6 +1282,18 @@ def run(
                 console.print(f"[magenta]hitch cadence:[/] {hint}")
             else:
                 console.print("[dim]no hitches >=30ms recorded.[/]")
+            # Per-hook game-side request rate. A BLOCKING hook on a hot (per-frame) function stalls
+            # the game on every call regardless of whether it returns text, so a high req/s here —
+            # even with no timed serve events — flags the hot hook (e.g. player) the timing table hides.
+            elapsed = profiler.elapsed() or 1.0
+            hook_rows = sorted(
+                ((n, getattr(h, "requests", 0)) for n, h, _ in installed),
+                key=lambda r: r[1], reverse=True,
+            )
+            if any(r[1] for r in hook_rows):
+                console.print("[magenta]hook request rates[/] (hot blocking hook = per-call game stalls):")
+                for name, n in hook_rows:
+                    console.print(f"  {name}: {n} reqs ({n / elapsed:.0f}/s)")
     console.print(f"[green]restored.[/] served {total_served} text fields.")
 
 

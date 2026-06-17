@@ -262,6 +262,18 @@ def test_serve_once_passes_ja_and_category_and_writes_en():
     assert _writes_to(mem, STATE)[-1] == struct.pack("<I", STATE_DONE)  # released
 
 
+def test_serve_once_counts_a_serviced_request_but_not_an_idle_poll():
+    # The hot-hook profiler counts a request ONLY when STATE_REQUEST was pending (a real game call),
+    # never on an idle poll — so req/s reflects the game's true call rate on the hooked function.
+    hook = _hook()
+    hook.serve_once(_mem("x".encode(), None), lambda j, c: "Hi")  # STATE_REQUEST pending
+    assert hook.requests == 1
+    idle = FakeMem()
+    idle.u32[STATE] = 0  # STATE_IDLE: no pending request
+    assert hook.serve_once(idle, lambda j, c: "Hi") is None
+    assert hook.requests == 1  # unchanged — an idle poll is not a serviced request
+
+
 def test_serve_once_writes_within_length_and_zero_pads():
     ja = "テストです".encode()  # 15 bytes; EN shorter -> tail must be zeroed within `length`
     mem = _mem(ja, None)
