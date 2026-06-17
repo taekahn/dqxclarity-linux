@@ -875,6 +875,12 @@ def run(
              "don't reach the rendered copy AND poking those buffers can crash the game. Needs a "
              "code-hook redo before re-enabling. --notice opts in at your own risk.",
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v",
+        help="Log every intercepted line per surface (and each name/notice write) — a noisy "
+             "diagnostic. Default is QUIET: the startup summary plus key events (game closed, "
+             "errors, exit) only.",
+    ),
 ) -> None:
     """Live-translate all enabled text surfaces (dialogue, quests, …) in the running game.
 
@@ -1175,11 +1181,15 @@ def run(
                 # defaults instead. An un-coerced interval would otherwise blow up at stop.wait(interval).
                 names_on = names if isinstance(names, bool) else True
                 interval = float(names_interval) if isinstance(names_interval, (int, float)) else 1.0
+                # QUIET by default: per-line/per-write logging only with --verbose. Sentinel-safe
+                # coerce for direct (non-CLI) cli.run callers that leave typer's OptionInfo in place.
+                verbose_on = verbose if isinstance(verbose, bool) else False
                 if names_on:
                     console.print("  name scanner on (concierge/party/chat)")
                 scanner = names_loop.start_scanner(
                     mem, translator, enabled=names_on, interval=interval,
-                    on_write=lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"),
+                    on_write=(lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"))
+                    if verbose_on else None,
                 )
                 # --- NOTICE SCANNER (per-attach daemon thread) ------------------------------------- #
                 # Same per-attach, private-stop lifecycle as the name scanner (see above): the startup
@@ -1193,14 +1203,15 @@ def run(
                     console.print("  notice scanner on (startup Important Notice)")
                 notice_scanner = notice_loop.start_notice_scanner(
                     mem, notice_translate_fn, enabled=notice_on, interval=interval,
-                    on_write=lambda: console.print("  [dim]notice[/] [green]translated[/]"),
+                    on_write=(lambda: console.print("  [dim]notice[/] [green]translated[/]"))
+                    if verbose_on else None,
                 )
                 try:
                     total_served += serve(
                         mem, installed, stop=stop, game_gone=game_gone,
-                        on_line=lambda name, ja: console.print(
+                        on_line=(lambda name, ja: console.print(
                             f"  [dim]{name}[/] {ja.splitlines()[0][:60]!r}"
-                        ),
+                        )) if verbose_on else None,
                     )
                 except KeyboardInterrupt:
                     user_quit = True
