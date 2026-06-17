@@ -32,6 +32,10 @@ class Profiler:
         self._on_slow = on_slow  # optional callback(ts_s, kind, label, ms, detail) for live logging
         self.agg: dict[str, list] = {}  # "kind:label" -> [count, total_s, max_s]
         self.slow: list[tuple] = []  # (ts_s, kind, label, dur_s, detail) for events >= SLOW_S
+        # Set by the name-scanner thread while a pass is in flight; read by the serve thread when it
+        # records a starvation gap, so each gap is ATTRIBUTED ("during a scan" vs "scan idle"). A
+        # plain bool read/write is atomic under the GIL — no lock needed for this coarse attribution.
+        self.scanning = False
 
     def record(self, kind: str, label: str, dur_s: float, detail: str = "") -> None:
         key = f"{kind}:{label}"

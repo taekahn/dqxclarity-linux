@@ -671,7 +671,8 @@ def serve(
             gap = now - last_iter
             last_iter = now
             if gap >= SLOW_S:
-                profiler.record("loop", "serve", gap)
+                # Attribute the stall: was the name scanner mid-pass when the loop was starved?
+                profiler.record("loop", "serve-scan" if profiler.scanning else "serve-idle", gap)
         idle = True
         for name, hook, translate_fn in hooks:
             try:

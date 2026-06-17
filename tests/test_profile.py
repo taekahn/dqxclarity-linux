@@ -96,3 +96,36 @@ def test_serve_without_profiler_is_a_noop_path():
     stop = threading.Event()
     hook = _FakeHook(stop)
     assert serve(None, [("dialogue", hook, None)], stop=stop) == 1
+
+
+class _SlowFirstHook:
+    """First serve_once sleeps (creating a >SLOW_S loop gap for the next iteration), then stops."""
+
+    def __init__(self, stop: threading.Event) -> None:
+        self.stop = stop
+        self.calls = 0
+
+    def serve_once(self, mem, fn):
+        import time as _t
+
+        self.calls += 1
+        if self.calls == 1:
+            _t.sleep(SLOW_S + 0.02)  # force the next iteration's loop gap above the threshold
+            return None
+        self.stop.set()
+        return None
+
+
+def test_loop_gap_attributed_to_scan_vs_idle():
+    # scanning=True at gap time -> labelled serve-scan (the scanner starved the loop).
+    stop = threading.Event()
+    p = Profiler()
+    p.scanning = True
+    serve(None, [("x", _SlowFirstHook(stop), None)], stop=stop, profiler=p)
+    assert "loop:serve-scan" in p.agg and "loop:serve-idle" not in p.agg
+
+    # scanning=False -> labelled serve-idle (stall happened with no scan in flight).
+    stop2 = threading.Event()
+    p2 = Profiler()  # scanning defaults False
+    serve(None, [("x", _SlowFirstHook(stop2), None)], stop=stop2, profiler=p2)
+    assert "loop:serve-idle" in p2.agg and "loop:serve-scan" not in p2.agg

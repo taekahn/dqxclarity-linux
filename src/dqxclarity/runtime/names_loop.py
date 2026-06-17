@@ -167,6 +167,8 @@ def run(
             continue
 
         _t_scan = time.monotonic() if profiler is not None else 0.0
+        if profiler is not None:
+            profiler.scanning = True  # mark the window so serve-loop gaps get attributed to the scan
         all_hits: list[int] = []  # every match address found this pass, for warm-set recomputation
         if do_full:
             stats.full_scans += 1
@@ -211,6 +213,7 @@ def run(
                         on_write(ja, en)
 
         if profiler is not None:
+            profiler.scanning = False
             profiler.record(
                 "namescan", "full" if do_full else "warm", time.monotonic() - _t_scan,
                 f"regions={len(scan_regions)} hits={len(all_hits)}",

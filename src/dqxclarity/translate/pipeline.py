@@ -12,6 +12,7 @@ from __future__ import annotations
 import queue
 import re
 import threading
+import time
 import unicodedata
 
 from .db import TranslationCache, rank_of
@@ -70,6 +71,7 @@ class Translator:
         self.sibling_name_ja = ""
         self.sibling_name_en = ""
         self.sibling_relationship = 0  # raw login byte (1-4); 0 = unknown
+        self.profiler = None  # optional runtime.profile.Profiler set by `run --profile` (times _run)
         # Compiled honorific-strip patterns, lazily (re)built when the (player, sibling) name pair
         # changes — the PLAYER hook can swap the names at runtime, so we key the cache on the names.
         self._honorific_key: tuple[str, str] | None = None
@@ -373,6 +375,7 @@ class Translator:
             # clean(er) JA, glossary as REFERENCE (not substituted), player/sibling names, and the
             # rough google baseline — all derived here from ``ja`` + translator state (no queue
             # changes). A plain provider (Google) keeps the substituting _prepare_for_mt path.
+            _t_mt = time.monotonic() if self.profiler is not None else 0.0
             try:
                 if hasattr(bg, "translate_rich"):
                     results = bg.translate_rich(self._build_claude_items(batch))
@@ -380,6 +383,11 @@ class Translator:
                     results = bg.translate([self._prepare_for_mt(ja) for ja, _ in batch])
             except Exception:  # noqa: BLE001 - provider must not kill the worker
                 results = [None] * len(batch)
+            if self.profiler is not None:
+                # Time the whole provider call. Mostly network/subprocess wait (GIL released), so a
+                # big number here is NOT itself a game stall — but it tells us how busy/slow the
+                # background upgrade lane is, and whether MT activity coincides with serve-idle gaps.
+                self.profiler.record("mt", bg.name, time.monotonic() - _t_mt, f"batch={len(batch)}")
             for (ja, _surface), en in zip(batch, results):
                 if en:
                     # Fold provider output to font-renderable ASCII (GAP #22); provider output only,

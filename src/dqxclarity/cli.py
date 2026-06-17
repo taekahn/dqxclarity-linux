@@ -1108,6 +1108,7 @@ def run(
             )
         )
         console.print("  [magenta]profiling on[/] — slow events (>=30ms) logged live; summary on exit")
+        translator.profiler = profiler  # so the background MT worker (_run) also records mt:<provider>
     try:
         while True:
             if first_iteration:
