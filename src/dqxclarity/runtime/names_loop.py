@@ -20,6 +20,14 @@ from ..translate.pipeline import Translator
 # makes the loop cheap. A module constant so tests can shrink it to drive the timer deterministically.
 FULL_RESCAN_SECS = 20.0
 
+# Memory-read chunk size for the scanner's pattern_scan calls. CRITICAL for game smoothness, not just
+# throughput: `re.finditer` over a buffer is ONE C call that holds the GIL uninterrupted, so a 16 MiB
+# chunk = a ~86 ms GIL stall, during which the serve loop can't answer the game's hook requests and
+# the game visibly hitches (measured: a full sweep emitted ~58 such stalls). A 1 MiB chunk drops each
+# uninterrupted hold to ~5 ms (under a 60fps frame), so the serve loop interleaves and the stutter is
+# imperceptible — the full sweep still scans the same bytes, just in finer slices. (#34)
+SCAN_CHUNK_BYTES = 1 << 20  # 1 MiB
+
 
 def _is_japanese(text: str) -> bool:
     return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" or "＀" <= c <= "￯" for c in text)
@@ -179,7 +187,9 @@ def run(
             scan_regions = warm_regions
 
         for np in NAME_PATTERNS:
-            for match in mem.pattern_scan(np.pattern, limit=200, regions=scan_regions) or []:
+            for match in mem.pattern_scan(
+                np.pattern, limit=200, regions=scan_regions, _chunk=SCAN_CHUNK_BYTES
+            ) or []:
                 all_hits.append(match)
                 name_addr = match + np.name_offset
                 ja = mem.read_cstring(name_addr, 64)

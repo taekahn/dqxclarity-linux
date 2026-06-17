@@ -208,7 +208,7 @@ class _CollisionMem:
     def scannable_regions(self, *, data_only=True):
         return [MapRegion(0x1000, 0x2000, "rw-p", "[heap]")]
 
-    def pattern_scan(self, pattern, *, data_only=True, limit=200, regions=None):
+    def pattern_scan(self, pattern, *, data_only=True, limit=200, regions=None, _chunk=None):
         return [0x1000]
 
     def read_cstring(self, addr, n=64):
@@ -318,7 +318,7 @@ class _RegionMem:
     def scannable_regions(self, *, data_only=True):
         return list(self._regions)
 
-    def pattern_scan(self, pattern, *, data_only=True, limit=200, regions=None):
+    def pattern_scan(self, pattern, *, data_only=True, limit=200, regions=None, _chunk=None):
         scanned = regions if regions is not None else self._regions
         self.scan_calls.append(list(scanned))
         if self._hit_addr is None:
