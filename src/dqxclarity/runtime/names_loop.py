@@ -52,6 +52,38 @@ def _region_for(addr: int, regions: list[MapRegion]) -> MapRegion | None:
     return None
 
 
+# Half-width of a "warm" maintenance window around each hit. A name lives in a small buffer, so the
+# maintenance pass shouldn't re-read the WHOLE region it sits in (that region can be the ~241 MB party
+# arena -> a multi-hundred-MB re-read every tick, the residual stutter). Instead re-scan only a ~1 MiB
+# window around each hit: still catches the name flipping back to JA AND a nearby new entry (e.g. the
+# next chat line), while reading kilobytes, not megabytes. (#34)
+WARM_HALF_BYTES = 512 << 10  # 512 KiB each side -> ~1 MiB window
+
+
+def _warm_windows(
+    hits: list[int], owning_regions: list[MapRegion], half: int = WARM_HALF_BYTES
+) -> list[MapRegion]:
+    """Small coalesced MapRegion windows around each hit, clamped to the hit's owning region.
+
+    Replaces the old "warm = whole region that had a hit" set. Overlapping windows (adjacent hits)
+    are merged so a cluster shares one scan. A hit with no known owning region is skipped.
+    """
+    spans: list[list[int]] = []
+    for addr in hits:
+        r = _region_for(addr, owning_regions)
+        if r is None:
+            continue
+        spans.append([max(r.start, addr - half), min(r.end, addr + half)])
+    spans.sort()
+    merged: list[list[int]] = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [MapRegion(s, e, "rw-p", "<warm-window>") for s, e in merged]
+
+
 @dataclass
 class LoopStats:
     scans: int = 0
@@ -247,15 +279,11 @@ def run(
             warm_regions = []
             continue  # skip the timer bookkeeping below; rediscover on the very next tick
 
-        # Recompute the warm set = the distinct regions that contained at least one hit this pass.
-        new_warm: list[MapRegion] = []
-        seen_starts: set[int] = set()
-        for addr in all_hits:
-            r = _region_for(addr, last_full_regions)
-            if r is not None and r.start not in seen_starts:
-                seen_starts.add(r.start)
-                new_warm.append(r)
-        warm_regions = new_warm
+        # Recompute the warm set = small windows around this pass's hits (NOT whole regions): a name
+        # living in a huge arena now costs a ~1 MiB re-read per maintenance tick instead of the whole
+        # region. Discovery (the full sweep) still uses last_full_regions to find names that appear
+        # far from any current window. Windows are clamped to the hit's owning FULL region.
+        warm_regions = _warm_windows(all_hits, last_full_regions)
 
         if do_full:
             # Arm the next periodic sweep regardless of outcome, RELATIVE TO COMPLETION (not the tick

@@ -370,6 +370,25 @@ def test_first_tick_full_scan_then_warm_only(monkeypatch):
     assert mem.writes  # the name was translated+written
 
 
+def test_warm_set_is_a_small_window_not_the_whole_region(monkeypatch):
+    """A hit inside a HUGE region must make the maintenance pass scan only a ~1 MiB window around it,
+    not re-read the whole region (the residual stutter: a name in the ~241 MB party arena)."""
+    monkeypatch.setattr(names_loop, "FULL_RESCAN_SECS", 1000.0)  # isolate from the periodic timer
+    big = MapRegion(0x100000, 0x100000 + (200 << 20), "rw-p", "[anon]")  # 200 MiB arena
+    hit = big.start + (100 << 20)  # name sits in the middle, far from the region edges
+    mem = _RegionMem([big], hit, "スライム")
+
+    names_loop.run(mem, _PlainTranslator(), stop=_NTickStop(2), interval=0)
+
+    # Tick 2 is warm-only: its scanned span is a synthetic "<warm-window>" region around the hit.
+    warm_calls = [c for c in mem.scan_calls if c and c[0].path == "<warm-window>"]
+    assert warm_calls, "maintenance tick must scan a warm window"
+    win = warm_calls[0][0]
+    assert win.start <= hit < win.end                                   # window covers the name
+    assert (win.end - win.start) <= 2 * names_loop.WARM_HALF_BYTES + 16  # ~1 MiB, not 200 MiB
+    assert (win.end - win.start) < big.size // 100                      # decisively smaller
+
+
 def test_periodic_full_rescan_after_timer(monkeypatch):
     """After FULL_RESCAN_SECS elapses, a full re-sweep happens even with a non-empty warm set."""
     monkeypatch.setattr(names_loop, "FULL_RESCAN_SECS", 5.0)
