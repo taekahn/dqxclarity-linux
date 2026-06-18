@@ -280,8 +280,12 @@ def run_env(monkeypatch):
         def stop_and_join(self, timeout=None):
             state["scanner_stops"] += 1
 
-    def fake_start_scanner(mem, translator, *, enabled, interval=1.0, on_write=None, profiler=None):
-        state["scanner_starts"].append({"mem": mem, "enabled": enabled, "interval": interval})
+    def fake_start_scanner(
+        mem, translator, *, enabled, interval=1.0, on_write=None, profiler=None, patterns=None
+    ):
+        state["scanner_starts"].append(
+            {"mem": mem, "enabled": enabled, "interval": interval, "patterns": patterns}
+        )
         return _FakeScanner(enabled)
 
     monkeypatch.setattr(names_loop_mod, "start_scanner", fake_start_scanner)

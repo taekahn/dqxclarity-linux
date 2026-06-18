@@ -36,6 +36,32 @@ SCAN_CHUNK_BYTES = 1 << 20  # 1 MiB
 SCAN_PACE_RATIO = 1.0
 
 
+# Friendly CLI names for the three scanned patterns, so `--name-patterns` can subset the scanner
+# (e.g. drop the dynamic chat scan, or isolate one for diagnosing a hitch). Maps to the canonical
+# NamePattern.name in signatures.NAME_PATTERNS.
+PATTERN_ALIASES = {"concierge": "concierge_name", "party": "menu_ai_name", "chat": "comm_name"}
+_CANONICAL_TO_FRIENDLY = {v: k for k, v in PATTERN_ALIASES.items()}
+
+
+def select_patterns(names):
+    """Resolve friendly names (concierge/party/chat) OR canonical names to NamePatterns.
+
+    Preserves NAME_PATTERNS order; unknown tokens are ignored (the caller can diff to warn). An empty
+    / all-unknown selection yields ``[]`` (caller treats that as "scanner off").
+    """
+    wanted = set()
+    for n in names:
+        n = (n or "").strip().lower()
+        if n:
+            wanted.add(PATTERN_ALIASES.get(n, n))
+    return [np for np in NAME_PATTERNS if np.name in wanted]
+
+
+def friendly_name(canonical: str) -> str:
+    """Canonical pattern name -> its friendly alias (for display), or the canonical name unchanged."""
+    return _CANONICAL_TO_FRIENDLY.get(canonical, canonical)
+
+
 def _is_japanese(text: str) -> bool:
     return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" or "＀" <= c <= "￯" for c in text)
 
@@ -122,6 +148,7 @@ def start_scanner(
     interval: float = 1.0,
     on_write=None,
     profiler=None,
+    patterns=None,
 ) -> ScannerHandle:
     """Start the polling name scanner as a DAEMON thread for ONE game attach, return a handle.
 
@@ -144,7 +171,10 @@ def start_scanner(
     thread = threading.Thread(
         target=run,
         args=(mem, translator),
-        kwargs={"stop": stop, "interval": interval, "on_write": on_write, "profiler": profiler},
+        kwargs={
+            "stop": stop, "interval": interval, "on_write": on_write,
+            "profiler": profiler, "patterns": patterns,
+        },
         name="name-scanner",
         daemon=True,  # never block process exit on it; run() always stop+joins it explicitly anyway
     )
@@ -160,6 +190,7 @@ def run(
     interval: float = 1.0,
     on_write=None,
     profiler=None,
+    patterns=None,
 ) -> LoopStats:
     """Run until ``stop`` is set. Returns accumulated stats.
 
@@ -188,6 +219,7 @@ def run(
           full sweep then also finds nothing, the warm set is empty and case (a)'s backoff governs.
     """
     stats = LoopStats()
+    patterns = patterns if patterns is not None else NAME_PATTERNS  # subset via --name-patterns
     warm_regions: list[MapRegion] = []
     # Region list captured by the most recent FULL sweep — used to map hit addresses back to their
     # owning region. Warm-only passes reuse this (warm regions are a subset of it); we only refresh
@@ -225,7 +257,7 @@ def run(
             stats.warm_scans += 1
             scan_regions = warm_regions
 
-        for np in NAME_PATTERNS:
+        for np in patterns:
             for match in mem.pattern_scan(
                 np.pattern, limit=200, regions=scan_regions,
                 _chunk=SCAN_CHUNK_BYTES, pace_ratio=SCAN_PACE_RATIO,

@@ -43,7 +43,7 @@ def test_start_scanner_enabled_starts_thread_with_mem_and_translator(monkeypatch
     seen = {}
     started = threading.Event()
 
-    def fake_run(mem, translator, *, stop, interval, on_write, profiler=None):
+    def fake_run(mem, translator, *, stop, interval, on_write, profiler=None, patterns=None):
         seen["mem"] = mem
         seen["translator"] = translator
         seen["interval"] = interval
@@ -95,7 +95,7 @@ def test_stop_and_join_sets_event_and_joins(monkeypatch):
     """stop_and_join sets the private event (unblocking names_loop.run) and joins the thread."""
     ran_to_completion = threading.Event()
 
-    def fake_run(mem, translator, *, stop, interval, on_write, profiler=None):
+    def fake_run(mem, translator, *, stop, interval, on_write, profiler=None, patterns=None):
         stop.wait()             # the real loop blocks until stop is set
         ran_to_completion.set()  # reached only once stop is set -> proves join saw a clean exit
 
@@ -348,6 +348,33 @@ def _full_region_calls(mem):
 def _warm_only_calls(mem):
     """Region lists from scan calls that swept ONLY the warm region."""
     return [c for c in mem.scan_calls if {r.start for r in c} == {_R_WARM.start}]
+
+
+def test_select_patterns_resolves_friendly_canonical_and_ignores_unknown():
+    names = {np.name for np in names_loop.NAME_PATTERNS}
+    assert names == {"concierge_name", "menu_ai_name", "comm_name"}  # the three scanned kinds
+    # friendly alias -> canonical
+    assert [p.name for p in names_loop.select_patterns(["party"])] == ["menu_ai_name"]
+    # canonical passes through too
+    assert [p.name for p in names_loop.select_patterns(["comm_name"])] == ["comm_name"]
+    # mixed + unknown -> all known kept in NAME_PATTERNS order, unknown dropped, deduped
+    sel = names_loop.select_patterns(["chat", "concierge", "bogus", "party"])
+    assert [p.name for p in sel] == [np.name for np in names_loop.NAME_PATTERNS]
+    assert names_loop.select_patterns([]) == []
+    assert names_loop.select_patterns(["bogus"]) == []
+    assert names_loop.friendly_name("menu_ai_name") == "party"
+
+
+def test_run_scans_only_the_selected_patterns(monkeypatch):
+    """patterns= subsets the scanner: one selected kind -> one pattern_scan call per tick, not three."""
+    monkeypatch.setattr(names_loop, "FULL_RESCAN_SECS", 1000.0)
+    mem = _RegionMem([_R_WARM], _R_WARM.start, "スライム")
+    names_loop.run(
+        mem, _PlainTranslator(), stop=_NTickStop(1), interval=0,
+        patterns=names_loop.select_patterns(["party"]),
+    )
+    assert len(mem.scan_calls) == 1                      # exactly ONE pattern scanned (not 3)
+    assert len(names_loop.NAME_PATTERNS) == 3            # guard: default would have been 3
 
 
 def test_first_tick_full_scan_then_warm_only(monkeypatch):

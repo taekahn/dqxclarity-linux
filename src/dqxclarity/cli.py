@@ -862,6 +862,12 @@ def run(
              "from the 'player' hook (which auto-detects YOUR + your sibling's name from the login "
              "struct); both are complementary. --no-names disables the scanner.",
     ),
+    name_patterns: str = typer.Option(
+        "concierge,party,chat", "--name-patterns",
+        help="Which of the scanned name kinds to translate, comma-separated: concierge, party "
+             "(menu AI), chat. Default = all three. Subset to drop the dynamic chat scan or to "
+             "isolate one (e.g. --name-patterns party). --no-names disables all of them.",
+    ),
     names_interval: float = typer.Option(
         1.0, "--names-interval", help="Seconds between name-scanner passes (with --names)."
     ),
@@ -1208,13 +1214,24 @@ def run(
                 # QUIET by default: per-line/per-write logging only with --verbose. Sentinel-safe
                 # coerce for direct (non-CLI) cli.run callers that leave typer's OptionInfo in place.
                 verbose_on = verbose if isinstance(verbose, bool) else False
-                if names_on:
-                    console.print("  name scanner on (concierge/party/chat)")
+                # Granular scanner: --name-patterns subsets concierge/party/chat (--no-names = all off).
+                np_raw = name_patterns if isinstance(name_patterns, str) else "concierge,party,chat"
+                requested = [t.strip() for t in np_raw.split(",") if t.strip()]
+                selected = names_loop.select_patterns(requested) if names_on else []
+                _known = {np.name for np in names_loop.NAME_PATTERNS}
+                unknown = [r for r in requested
+                           if names_loop.PATTERN_ALIASES.get(r.lower(), r.lower()) not in _known]
+                if names_on and unknown:
+                    console.print(f"  [yellow]ignoring unknown name-patterns: {', '.join(unknown)}[/]")
+                scanner_on = names_on and bool(selected)
+                if scanner_on:
+                    active = ", ".join(names_loop.friendly_name(np.name) for np in selected)
+                    console.print(f"  name scanner on ({active})")
                 scanner = names_loop.start_scanner(
-                    mem, translator, enabled=names_on, interval=interval,
+                    mem, translator, enabled=scanner_on, interval=interval,
                     on_write=(lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"))
                     if verbose_on else None,
-                    profiler=profiler,
+                    profiler=profiler, patterns=selected,
                 )
                 # --- NOTICE SCANNER (per-attach daemon thread) ------------------------------------- #
                 # Same per-attach, private-stop lifecycle as the name scanner (see above): the startup
