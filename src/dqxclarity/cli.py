@@ -857,10 +857,17 @@ def run(
     ),
     names: bool = typer.Option(
         True, "--names/--no-names",
-        help="Run the polling NAME scanner alongside the hooks: live-translate concierge/party "
-             "(menu) / chat names by scanning memory (no hooking). On by default. This is SEPARATE "
-             "from the 'player' hook (which auto-detects YOUR + your sibling's name from the login "
-             "struct); both are complementary. --no-names disables the scanner.",
+        help="Master toggle for live NAME translation alongside the hooks. On by default: names come "
+             "from cheap POINTER CHAINS where we have one (currently the party-panel name), with "
+             "no memory scanning. Add --name-scan for the old intrusive AOB scanner (concierge/chat). "
+             "SEPARATE from the 'player' hook (which auto-detects YOUR + your sibling's name from the "
+             "login struct). --no-names disables ALL name translation (chains and scanner).",
+    ),
+    name_scan: bool = typer.Option(
+        False, "--name-scan/--no-name-scan",
+        help="Use the INTRUSIVE memory-scan name translator (AOB-sweeps ~1GB/tick to find concierge/"
+             "party/chat names; causes periodic microstutter). Default OFF: names come from cheap "
+             "pointer chains where we have them, and uncovered kinds are skipped with a warning.",
     ),
     name_patterns: str = typer.Option(
         "concierge,party,chat", "--name-patterns",
@@ -919,7 +926,7 @@ def run(
         build_translate_fn,
         serve,
     )
-    from .runtime import names_loop, notice_loop
+    from .runtime import name_chains, names_loop, notice_loop
     from .runtime.playernames import build_apply_names
     from .translate.community import load_reward_items_local, load_suppressions_local
     from .translate.suppression import SuppressionIndex
@@ -1214,25 +1221,80 @@ def run(
                 # QUIET by default: per-line/per-write logging only with --verbose. Sentinel-safe
                 # coerce for direct (non-CLI) cli.run callers that leave typer's OptionInfo in place.
                 verbose_on = verbose if isinstance(verbose, bool) else False
-                # Granular scanner: --name-patterns subsets concierge/party/chat (--no-names = all off).
-                np_raw = name_patterns if isinstance(name_patterns, str) else "concierge,party,chat"
-                requested = [t.strip() for t in np_raw.split(",") if t.strip()]
-                selected = names_loop.select_patterns(requested) if names_on else []
-                _known = {np.name for np in names_loop.NAME_PATTERNS}
-                unknown = [r for r in requested
-                           if names_loop.PATTERN_ALIASES.get(r.lower(), r.lower()) not in _known]
-                if names_on and unknown:
-                    console.print(f"  [yellow]ignoring unknown name-patterns: {', '.join(unknown)}[/]")
-                scanner_on = names_on and bool(selected)
-                if scanner_on:
-                    active = ", ".join(names_loop.friendly_name(np.name) for np in selected)
-                    console.print(f"  name scanner on ({active})")
-                scanner = names_loop.start_scanner(
-                    mem, translator, enabled=scanner_on, interval=interval,
-                    on_write=(lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"))
-                    if verbose_on else None,
-                    profiler=profiler, patterns=selected,
+                name_scan_on = name_scan if isinstance(name_scan, bool) else False
+                name_on_write = (
+                    (lambda ja, en: console.print(f"  [dim]name[/] {ja} -> [green]{en}[/]"))
+                    if verbose_on else None
                 )
+                # NAME translation has TWO mutually-exclusive engines under the master `names` toggle:
+                #   * --name-scan: the INTRUSIVE AOB scanner (concierge/party/chat) — exactly as before.
+                #   * default: the cheap POINTER-CHAIN reader (party where we have a chain), with a
+                #     warning that scan-only kinds need --name-scan.
+                # --no-names (names_on False) runs NEITHER. Each start helper is called EXACTLY ONCE
+                # per attach; the inactive engine gets enabled=False (a no-op handle) so the uniform
+                # stop_and_join in the finally stays valid regardless of which engine is live.
+                if names_on and name_scan_on:
+                    # INTRUSIVE scanner path: --name-patterns subsets concierge/party/chat.
+                    np_raw = name_patterns if isinstance(name_patterns, str) else "concierge,party,chat"
+                    requested = [t.strip() for t in np_raw.split(",") if t.strip()]
+                    selected = names_loop.select_patterns(requested)
+                    _known = {np.name for np in names_loop.NAME_PATTERNS}
+                    unknown = [r for r in requested
+                               if names_loop.PATTERN_ALIASES.get(r.lower(), r.lower()) not in _known]
+                    if unknown:
+                        console.print(
+                            f"  [yellow]ignoring unknown name-patterns: {', '.join(unknown)}[/]"
+                        )
+                    if selected:
+                        active = ", ".join(names_loop.friendly_name(np.name) for np in selected)
+                        console.print(f"  name scanner on (intrusive AOB; {active})")
+                    scanner = names_loop.start_scanner(
+                        mem, translator, enabled=bool(selected), interval=interval,
+                        on_write=name_on_write, profiler=profiler, patterns=selected,
+                    )
+                    chain_reader = name_chains.start_chain_reader(
+                        mem, translator, None, enabled=False, interval=interval,
+                    )
+                elif names_on:
+                    # DEFAULT cheap pointer-chain path. Resolve the image base once; the chains are
+                    # expressed relative to it. A None base (module not mapped) or a party chain that
+                    # doesn't resolve at startup almost always means a game update moved the offsets —
+                    # warn and point the user at --name-scan.
+                    base = mem.module_base()
+                    covered = ", ".join(c.kind for c in name_chains.NAME_CHAINS)
+                    console.print(f"  name chains on ({covered})")
+                    console.print(
+                        f"  [yellow]concierge/chat names need --name-scan (intrusive memory scan); "
+                        f"pointer chains cover: {covered}[/]"
+                    )
+                    chain_ok = base is not None and any(
+                        name_chains.resolve_chain(mem, base, c) is not None
+                        for c in name_chains.NAME_CHAINS
+                    )
+                    if not chain_ok:
+                        console.print(
+                            "  [yellow]name pointer chain didn't resolve (likely a game update) — "
+                            "use --name-scan for the intrusive memory-scan name translator.[/]"
+                        )
+                    # enabled=chain_ok: if not even the always-resident party chain resolves at
+                    # startup it's a broken (game-updated) build — don't spin a thread that can only
+                    # mark everything broken; the warning above already told the user to use --name-scan.
+                    chain_reader = name_chains.start_chain_reader(
+                        mem, translator, base, enabled=chain_ok, interval=interval,
+                        on_write=name_on_write, profiler=profiler,
+                    )
+                    scanner = names_loop.start_scanner(
+                        mem, translator, enabled=False, interval=interval,
+                    )
+                else:
+                    # --no-names: neither engine runs. Both helpers are still called (uniform call
+                    # site) with enabled=False so the finally's stop_and_join has valid no-op handles.
+                    scanner = names_loop.start_scanner(
+                        mem, translator, enabled=False, interval=interval,
+                    )
+                    chain_reader = name_chains.start_chain_reader(
+                        mem, translator, None, enabled=False, interval=interval,
+                    )
                 # --- NOTICE SCANNER (per-attach daemon thread) ------------------------------------- #
                 # Same per-attach, private-stop lifecycle as the name scanner (see above): the startup
                 # "Important Notice" body is a STATIC buffer with no hook, so we scan+translate+write
@@ -1260,10 +1322,12 @@ def run(
                     user_quit = True
                     stop.set()
                 finally:
-                    # Stop+join BOTH scanners BEFORE leaving the with-block (and thus before any
-                    # re-attach). A short join timeout keeps a stuck scan from wedging exit; they're
-                    # daemon threads so even a missed join can't block process shutdown.
+                    # Stop+join ALL per-attach readers BEFORE leaving the with-block (and thus before
+                    # any re-attach). A short join timeout keeps a stuck scan from wedging exit;
+                    # they're daemon threads so even a missed join can't block process shutdown. At
+                    # most one of scanner/chain_reader has a live thread; the other is a no-op handle.
                     scanner.stop_and_join(timeout=5.0)
+                    chain_reader.stop_and_join(timeout=5.0)
                     notice_scanner.stop_and_join(timeout=5.0)
             # hook_session's finally has already restored THIS session's hooks + journal.
             # Re-attach ONLY for a genuine game-gone. A SIGTERM/SIGHUP that lands in the SAME tick

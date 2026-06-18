@@ -7,6 +7,7 @@ uses for names; it needs no code hooking, just the Phase 2 scanner + the transla
 
 from __future__ import annotations
 
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -64,6 +65,58 @@ def friendly_name(canonical: str) -> str:
 
 def _is_japanese(text: str) -> bool:
     return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" or "＀" <= c <= "￯" for c in text)
+
+
+def translate_and_write_name(mem, translator, name_addr: int, write_prefix: str, on_write=None):
+    """Read the JA name at ``name_addr``, translate it, and write the result back IN PLACE.
+
+    The single source of truth for the per-name translate+write contract, shared by BOTH the AOB
+    scanner (``run``) and the pointer-chain reader (``run_chains``) so they behave identically:
+
+      * Read up to 64 bytes as a C string. If it isn't Japanese, do nothing (it's already English /
+        empty — names we translated read as English in memory and won't re-trigger).
+      * Player/sibling substitution FIRST — the player's OWN name in the party buffer (e.g. タイカン)
+        collides with a cached monster name ("Squid"), so an exact match on the live player/sibling
+        JA name must beat the cache lookup. Same precedence as dispatch._translate_name_runs.resolve();
+        without it the player's party nameplate renders as the colliding monster name.
+      * Skip when the translation is empty or unchanged from the JA.
+      * Re-read guard: if the value changed between the first read and now, skip (don't clobber a
+        buffer that just got reused).
+      * Write ``write_prefix + en`` with a byte BUDGET of the JA name's span (+NUL) plus the prefix's
+        bytes — the prefix (e.g. the nameplate \x04) doesn't count against the name field's size.
+
+    Returns ``(ja, en)`` on a successful write (so callers can sample/log it), else None.
+
+    NEVER raises into the caller's loop: the reads/write touch the live game, which can die mid-tick
+    (process_vm_readv/writev or the /proc/<pid>/mem fallback then raises struct.error/OSError). Both
+    callers (the AOB scanner loop and the pointer-chain reader thread) must keep running, so any such
+    blip is swallowed and the name is just skipped this tick.
+    """
+    try:
+        ja = mem.read_cstring(name_addr, 64)
+        if not ja or not _is_japanese(ja):
+            return None
+        if ja == translator.player_name_ja and translator.player_name_en:
+            en = translator.player_name_en
+        elif ja == translator.sibling_name_ja and translator.sibling_name_en:
+            en = translator.sibling_name_en
+        else:
+            en = translator.translate_name(ja)
+        if not en or en == ja:
+            return None
+        # Re-read guard against the value changing between scan and write.
+        if mem.read_cstring(name_addr, 64) != ja:
+            return None
+        # Budget = the JA name's byte span (+NUL), plus the control prefix the game expects prepended
+        # (e.g. \x04) which doesn't count against the name field.
+        budget = len(ja.encode()) + 1 + len(write_prefix.encode())
+        if mem.write_cstring(name_addr, write_prefix + en, max_bytes=budget):
+            if on_write:
+                on_write(ja, en)
+            return (ja, en)
+        return None
+    except (struct.error, OSError):
+        return None  # game died / transient blip mid read-or-write — skip, never crash the loop
 
 
 def _region_for(addr: int, regions: list[MapRegion]) -> MapRegion | None:
@@ -264,35 +317,22 @@ def run(
             ) or []:
                 all_hits.append(match)
                 name_addr = match + np.name_offset
-                ja = mem.read_cstring(name_addr, 64)
-                if not ja or not _is_japanese(ja):
+                # A name match is "seen" only when it actually reads as Japanese — count it here so
+                # the stat matches the helper's own is-Japanese gate (which it re-checks internally).
+                if not _is_japanese(mem.read_cstring(name_addr, 64)):
                     continue
                 stats.seen += 1
-                # Player/sibling substitution FIRST — the player's OWN name in the party buffer
-                # (e.g. タイカン) collides with a cached monster name ("Squid"), so an exact match on
-                # the live player/sibling JA name must beat the cache lookup. Same precedence as
-                # dispatch._translate_name_runs.resolve(); without it the player's party nameplate
-                # renders as the colliding monster name.
-                if ja == translator.player_name_ja and translator.player_name_en:
-                    en = translator.player_name_en
-                elif ja == translator.sibling_name_ja and translator.sibling_name_en:
-                    en = translator.sibling_name_en
-                else:
-                    en = translator.translate_name(ja)
-                if not en or en == ja:
-                    continue
-                # Re-read guard against the value changing between scan and write.
-                if mem.read_cstring(name_addr, 64) != ja:
-                    continue
-                # Budget = the JA name's byte span (+NUL), plus the control prefix the game
-                # expects prepended (e.g. \x04) which doesn't count against the name field.
-                budget = len(ja.encode()) + 1 + len(np.write_prefix.encode())
-                if mem.write_cstring(name_addr, np.write_prefix + en, max_bytes=budget):
+                # The per-name translate+write contract (player/sibling precedence, re-read guard,
+                # prefix budget) lives in the shared helper so the scanner and the chain reader stay
+                # byte-for-byte identical. on_write is invoked by the helper on a real write.
+                written = translate_and_write_name(
+                    mem, translator, name_addr, np.write_prefix, on_write=on_write
+                )
+                if written is not None:
+                    ja, en = written
                     stats.written += 1
                     if len(stats.samples) < 10 and (ja, en) not in stats.samples:
                         stats.samples.append((ja, en))
-                    if on_write:
-                        on_write(ja, en)
 
         if profiler is not None:
             profiler.scanning = False

@@ -116,40 +116,64 @@ def test_stop_and_join_sets_event_and_joins(monkeypatch):
 # =============================================================================================== #
 
 
-def test_run_flag_names_defaults_true_and_starts_scanner(run_env):  # noqa: F811
-    """The --names flag defaults True: a normal `run` starts the scanner (enabled) for the attach."""
+def test_run_default_starts_chain_reader_not_scanner(run_env):  # noqa: F811
+    """The DEFAULT (--names, no --name-scan): the cheap pointer-CHAIN reader runs, NOT the scanner."""
     st = run_env["state"]
     st["serve_script"] = [_user_quit]
 
-    # Don't pass names -> exercise the typer default. (Direct call leaves the OptionInfo default,
-    # which run() coerces via bool(names); the wiring must treat the default as ON.)
+    # Don't pass names/name_scan -> exercise the typer defaults (names ON, name_scan OFF).
     cli.run(hooks="dialogue", duration=0.0, patch=True)
 
-    assert len(st["scanner_starts"]) == 1            # one scanner per attach
-    assert st["scanner_starts"][0]["enabled"] is True  # default is ON
-    # Started against THIS attach's mem (the fake LinuxProcessMemory dict) and the ONE translator.
+    # The chain reader is the enabled name engine; the scanner is started disabled (uniform call site).
+    assert len(st["chain_starts"]) == 1
+    assert st["chain_starts"][0]["enabled"] is True
+    assert st["chain_starts"][0]["mem"] == {"pid": 100}   # bound to THIS attach's mem
+    assert st["chain_starts"][0]["base"] == 0x400000       # the resolved module base threaded through
+    # The interval default must thread through as a concrete float, not typer's OptionInfo sentinel.
+    assert st["chain_starts"][0]["interval"] == 1.0
+    assert isinstance(st["chain_starts"][0]["interval"], float)
+    # The AOB scanner was started DISABLED (no thread) — the default must not memory-scan.
+    assert len(st["scanner_starts"]) == 1
+    assert st["scanner_starts"][0]["enabled"] is False
+    # Both readers stopped+joined once for the attach.
+    assert st["scanner_stops"] == 1
+    assert st["chain_stops"] == 1
+
+
+def test_run_name_scan_starts_scanner_not_chain_reader(run_env):  # noqa: F811
+    """--name-scan: the INTRUSIVE AOB scanner runs (enabled); the chain reader does NOT."""
+    st = run_env["state"]
+    st["serve_script"] = [_user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, name_scan=True)
+
+    assert len(st["scanner_starts"]) == 1
+    assert st["scanner_starts"][0]["enabled"] is True       # the scanner is the enabled engine
     assert st["scanner_starts"][0]["mem"] == {"pid": 100}
-    # The interval default must thread through as a concrete float, not typer's OptionInfo sentinel
-    # (run() coerces with float(names_interval)); an un-coerced sentinel would crash stop.wait(interval).
-    assert st["scanner_starts"][0]["interval"] == 1.0
-    assert isinstance(st["scanner_starts"][0]["interval"], float)
-    assert st["scanner_stops"] == 1                  # stopped+joined once for the attach
+    # The chain reader was started DISABLED (no thread) under --name-scan.
+    assert len(st["chain_starts"]) == 1
+    assert st["chain_starts"][0]["enabled"] is False
+    assert st["scanner_stops"] == 1
+    assert st["chain_stops"] == 1
 
 
-def test_run_no_names_disables_scanner(run_env):  # noqa: F811
-    """--no-names -> start_scanner is still called (uniform call site) but with enabled=False."""
+def test_run_no_names_disables_both(run_env):  # noqa: F811
+    """--no-names -> NEITHER engine runs: both start helpers are called but with enabled=False."""
     st = run_env["state"]
     st["serve_script"] = [_user_quit]
 
     cli.run(hooks="dialogue", duration=0.0, patch=True, names=False)
 
     assert len(st["scanner_starts"]) == 1
-    assert st["scanner_starts"][0]["enabled"] is False  # disabled
-    assert st["scanner_stops"] == 1                      # still stop_and_join'd (no-op handle)
+    assert st["scanner_starts"][0]["enabled"] is False
+    assert len(st["chain_starts"]) == 1
+    assert st["chain_starts"][0]["enabled"] is False
+    assert st["scanner_stops"] == 1   # still stop_and_join'd (no-op handles)
+    assert st["chain_stops"] == 1
 
 
-def test_run_scanner_started_and_stopped_per_attach(run_env):  # noqa: F811
-    """A game-gone re-attach starts a FRESH scanner bound to the new mem, and each is stopped once."""
+def test_run_chain_reader_started_and_stopped_per_attach(run_env):  # noqa: F811
+    """A game-gone re-attach starts a FRESH chain reader bound to the new mem, each stopped once."""
     from test_lifecycle import _gone
 
     st = run_env["state"]
@@ -157,19 +181,43 @@ def test_run_scanner_started_and_stopped_per_attach(run_env):  # noqa: F811
 
     cli.run(hooks="dialogue", duration=0.0, patch=True)
 
-    assert len(st["scanner_starts"]) == 2   # one scanner per attach
-    # First attach uses the first pid's mem, the re-attach uses the new pid's mem.
+    assert len(st["chain_starts"]) == 2   # one chain reader per attach
+    assert st["chain_starts"][0]["mem"] == {"pid": 100}
+    assert st["chain_starts"][1]["mem"] == {"pid": 200}
+    assert st["chain_stops"] == 2         # each attach's chain reader stopped+joined exactly once
+
+
+def test_run_name_scan_started_and_stopped_per_attach(run_env):  # noqa: F811
+    """With --name-scan, a re-attach starts a FRESH scanner bound to the new mem, each stopped once."""
+    from test_lifecycle import _gone
+
+    st = run_env["state"]
+    st["serve_script"] = [_gone, _user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, name_scan=True)
+
+    assert len(st["scanner_starts"]) == 2
     assert st["scanner_starts"][0]["mem"] == {"pid": 100}
     assert st["scanner_starts"][1]["mem"] == {"pid": 200}
-    assert st["scanner_stops"] == 2         # each attach's scanner stopped+joined exactly once
+    assert st["scanner_stops"] == 2
 
 
-def test_run_uses_names_interval(run_env):  # noqa: F811
-    """--names-interval is threaded through to start_scanner's interval."""
+def test_run_uses_names_interval_for_chain_reader(run_env):  # noqa: F811
+    """--names-interval threads through to the DEFAULT chain reader's interval."""
     st = run_env["state"]
     st["serve_script"] = [_user_quit]
 
     cli.run(hooks="dialogue", duration=0.0, patch=True, names=True, names_interval=2.5)
+
+    assert st["chain_starts"][0]["interval"] == 2.5
+
+
+def test_run_uses_names_interval_for_scanner(run_env):  # noqa: F811
+    """--names-interval threads through to the scanner's interval under --name-scan."""
+    st = run_env["state"]
+    st["serve_script"] = [_user_quit]
+
+    cli.run(hooks="dialogue", duration=0.0, patch=True, name_scan=True, names_interval=2.5)
 
     assert st["scanner_starts"][0]["interval"] == 2.5
 
@@ -255,6 +303,79 @@ def test_scanner_non_player_name_uses_translate_name():
     names_loop.run(mem, _CollisionTranslator(), stop=_OneShotStop(), interval=0)
     assert mem.writes
     assert all("romaji(スライム)" in w for w in mem.writes)
+
+
+# =============================================================================================== #
+# names_loop.translate_and_write_name — the shared scanner/chain helper (behavior-preserving)     #
+# =============================================================================================== #
+
+
+class _HelperMem:
+    """Mem stub for the shared helper: serves a fixed JA name and records writes (text only)."""
+
+    def __init__(self, ja: str, *, fit: bool = True) -> None:
+        self._ja = ja
+        self._fit = fit
+        self.writes: list[tuple[str, int]] = []
+
+    def read_cstring(self, addr, n=64):
+        return self._ja
+
+    def write_cstring(self, addr, text, *, max_bytes):
+        if not self._fit:
+            return False
+        self.writes.append((text, max_bytes))
+        return True
+
+
+def test_helper_player_pin_beats_cache():
+    mem = _HelperMem("タイカン")
+    out = names_loop.translate_and_write_name(mem, _CollisionTranslator(), 0x10, "")
+    assert out == ("タイカン", "Taikan")
+    assert mem.writes and mem.writes[0][0] == "Taikan"
+
+
+def test_helper_sibling_pin_beats_cache():
+    mem = _HelperMem("きみこ")
+    out = names_loop.translate_and_write_name(mem, _CollisionTranslator(), 0x10, "")
+    assert out == ("きみこ", "Kimiko")
+
+
+def test_helper_non_pinned_uses_translate_name_and_prefix_budget():
+    mem = _HelperMem("スライム")
+    out = names_loop.translate_and_write_name(mem, _CollisionTranslator(), 0x10, "\x04")
+    assert out == ("スライム", "romaji(スライム)")
+    text, budget = mem.writes[0]
+    assert text == "\x04romaji(スライム)"  # prefix prepended to the written value
+    # Budget = JA byte span + NUL + the prefix's bytes (prefix doesn't count against the name field).
+    assert budget == len("スライム".encode()) + 1 + 1
+
+
+def test_helper_skips_non_japanese():
+    mem = _HelperMem("Slime")  # already English -> no write, returns None
+    assert names_loop.translate_and_write_name(mem, _CollisionTranslator(), 0x10, "") is None
+    assert mem.writes == []
+
+
+def test_helper_reread_guard_blocks_changed_buffer():
+    """If the buffer changes between the first read and the re-read guard, no write happens."""
+
+    class _ChangingMem:
+        def __init__(self):
+            self._reads = 0
+            self.writes = []
+
+        def read_cstring(self, addr, n=64):
+            self._reads += 1
+            return "スライム" if self._reads == 1 else "別の名前"  # changed on the guard re-read
+
+        def write_cstring(self, addr, text, *, max_bytes):
+            self.writes.append(text)
+            return True
+
+    mem = _ChangingMem()
+    assert names_loop.translate_and_write_name(mem, _PlainTranslator(), 0x10, "") is None
+    assert mem.writes == []
 
 
 # =============================================================================================== #

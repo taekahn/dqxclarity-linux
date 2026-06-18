@@ -60,6 +60,25 @@ _MAPS_RE = re.compile(
 )
 
 
+def parse_module_base(maps_text: str, name_suffix: str = "DQXGame.exe") -> int | None:
+    """Image base of ``name_suffix`` from raw ``/proc/<pid>/maps`` text — a pure, testable parser.
+
+    A maps line is ``range perms offset dev inode path``. We split with ``maxsplit=5`` so the path
+    (which contains spaces for the real DQX install — "DRAGON QUEST X") stays intact instead of being
+    shredded by a plain split. The image base is the start of the FIRST line whose path ends with
+    ``name_suffix`` AND whose file offset is ``00000000`` (the header/file-offset-0 mapping). Returns
+    None when no such line exists.
+    """
+    for line in maps_text.splitlines():
+        parts = line.split(maxsplit=5)
+        if len(parts) < 6:
+            continue
+        rng, _perms, offset, _dev, _inode, path = parts
+        if offset == "00000000" and path.rstrip().endswith(name_suffix):
+            return int(rng.split("-")[0], 16)
+    return None
+
+
 class LinuxProcessMemory:
     def __init__(self, pid: int, *, pointer_width: int = 4) -> None:
         self.pid = pid
@@ -164,10 +183,24 @@ class LinuxProcessMemory:
                 )
         return out
 
-    def module_base(self, name: str) -> int | None:
-        """Lowest mapped address of the named module (matched on the maps path)."""
-        bases = [r.start for r in self.regions() if r.path.endswith(name)]
-        return min(bases) if bases else None
+    def module_base(self, name_suffix: str = "DQXGame.exe") -> int | None:
+        """Image base of a mapped module = start of its file-offset-0 mapping. Returns None if absent.
+
+        The image base is the address where the FILE-OFFSET-0 page of the module is mapped — i.e. the
+        ``.text``/header mapping whose maps ``offset`` field is ``00000000`` — NOT merely the lowest
+        mapped address of the module (later same-file mappings can sit below it after relocation, and
+        the lowest mapping might be a non-zero-offset segment). DQXGame.exe loads at 0x400000 under
+        Wine (no ASLR); pointer chains are expressed relative to this base.
+
+        Reads ``/proc/<pid>/maps`` directly (not via ``regions()``) because the parse must NOT use a
+        plain ``split()``: the real DQX path contains spaces ("DRAGON QUEST X"), which a bare split
+        would shred. A missing/unreadable maps returns None.
+        """
+        try:
+            text = Path(f"/proc/{self.pid}/maps").read_text()
+        except OSError:
+            return None
+        return parse_module_base(text, name_suffix)
 
     def module_regions(self, name: str) -> list[MapRegion]:
         return [r for r in self.regions() if r.path.endswith(name)]

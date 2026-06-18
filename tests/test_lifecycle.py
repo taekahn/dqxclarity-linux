@@ -310,13 +310,49 @@ def run_env(monkeypatch):
         return _FakeNoticeScanner(enabled)
 
     monkeypatch.setattr(notice_loop_mod, "start_notice_scanner", fake_start_notice_scanner)
+
+    # Chain reader (pointer-chain name reader): stub start_chain_reader the SAME way as start_scanner,
+    # so the supervisory-loop tests stay hermetic. The DEFAULT (no --name-scan) name path resolves the
+    # module base + probes a chain before starting the reader, so the fake mem dict needs a
+    # module_base() and the chain resolve/probe must be a no-op here. The real start_chain_reader/
+    # run_chains/resolve_chain logic is covered directly in test_name_chains.py.
+    import dqxclarity.runtime.name_chains as name_chains_mod
+    state["chain_starts"] = []
+    state["chain_stops"] = 0
+
+    class _FakeChainReader:
+        def __init__(self, enabled):
+            self.enabled = enabled
+
+        def stop_and_join(self, timeout=None):
+            state["chain_stops"] += 1
+
+    def fake_start_chain_reader(
+        mem, translator, base, *, enabled, chains=None, interval=1.0, on_write=None, profiler=None
+    ):
+        state["chain_starts"].append(
+            {"mem": mem, "base": base, "enabled": enabled, "interval": interval}
+        )
+        return _FakeChainReader(enabled)
+
+    monkeypatch.setattr(name_chains_mod, "start_chain_reader", fake_start_chain_reader)
+    # The default name path probes resolve_chain at startup; keep it from touching the dict mem.
+    monkeypatch.setattr(name_chains_mod, "resolve_chain", lambda mem, base, chain: 0x1000)
     # _build_fn calls build_translate_fn for a plain dialogue spec; stub it so the loop test stays
     # decoupled from translator internals (fn building itself is covered by test_translate.py).
     monkeypatch.setattr(dispatch_mod, "build_translate_fn",
                         lambda *a, **k: (lambda ja: ja, None))
 
     import dqxclarity.process.memory_linux as mem_mod
-    monkeypatch.setattr(mem_mod, "LinuxProcessMemory", lambda pid: {"pid": pid})
+
+    class _FakeMem(dict):
+        """Fake mem: a dict ({"pid": pid}) so existing `== {"pid": N}` assertions hold, plus the
+        module_base() the default pointer-chain name path resolves at startup (returns a stub base)."""
+
+        def module_base(self, name_suffix="DQXGame.exe"):
+            return 0x400000
+
+    monkeypatch.setattr(mem_mod, "LinuxProcessMemory", lambda pid: _FakeMem(pid=pid))
     monkeypatch.setattr(cli.hookjournal, "recover_orphans", lambda mem, pid: [])
 
     import dqxclarity.process.hooks as hookmod
