@@ -28,6 +28,13 @@ FULL_RESCAN_SECS = 20.0
 # imperceptible — the full sweep still scans the same bytes, just in finer slices. (#34)
 SCAN_CHUNK_BYTES = 1 << 20  # 1 MiB
 
+# How hard the scanner is allowed to read the game's memory. A sweep reads hundreds of MB back-to-back
+# via process_vm_readv, holding the game's mmap lock / using memory bandwidth enough to microstutter
+# it (same root cause as the serve-loop poll, just in bulk). pace_ratio sleeps `work * ratio` after
+# each chunk, capping our duty cycle (1.0 ≈ 50%) so the game gets lock-free windows between chunks.
+# Trades scan speed (names appear a little slower) for a smooth game.
+SCAN_PACE_RATIO = 1.0
+
 
 def _is_japanese(text: str) -> bool:
     return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" or "＀" <= c <= "￯" for c in text)
@@ -188,7 +195,8 @@ def run(
 
         for np in NAME_PATTERNS:
             for match in mem.pattern_scan(
-                np.pattern, limit=200, regions=scan_regions, _chunk=SCAN_CHUNK_BYTES
+                np.pattern, limit=200, regions=scan_regions,
+                _chunk=SCAN_CHUNK_BYTES, pace_ratio=SCAN_PACE_RATIO,
             ) or []:
                 all_hits.append(match)
                 name_addr = match + np.name_offset
@@ -250,12 +258,15 @@ def run(
         warm_regions = new_warm
 
         if do_full:
-            # Arm the next periodic sweep regardless of outcome.
-            next_full_at = now + FULL_RESCAN_SECS
+            # Arm the next periodic sweep regardless of outcome, RELATIVE TO COMPLETION (not the tick
+            # start): a paced full sweep can take tens of seconds, and scheduling from the start time
+            # would make a long sweep re-trigger immediately (back-to-back sweeps = constant hitching).
+            done = time.monotonic()
+            next_full_at = done + FULL_RESCAN_SECS
             if not warm_regions:
                 # No names anywhere: back off so we don't full-sweep the whole heap every tick while
                 # running through an empty area. Discovery is gated until this deadline (case a).
-                backoff_until = now + FULL_RESCAN_SECS
+                backoff_until = done + FULL_RESCAN_SECS
 
         stop.wait(interval)
     return stats

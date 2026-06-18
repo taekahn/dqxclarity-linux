@@ -16,6 +16,7 @@ import ctypes.util
 import os
 import re
 import struct
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -199,6 +200,7 @@ class LinuxProcessMemory:
         limit: int | None = None,
         regions: list[MapRegion] | None = None,
         _chunk: int = 16 << 20,
+        pace_ratio: float = 0.0,
     ) -> list[int] | int | None:
         """Search the target's memory for a byte-regex ``pattern`` (matched with re.DOTALL).
 
@@ -212,6 +214,13 @@ class LinuxProcessMemory:
         rescanning just those avoids re-reading hundreds of MB of heap every tick. ``data_only`` is
         ignored when ``regions`` is supplied (the caller already chose the region set). When
         ``regions`` is None the behavior is unchanged from before — existing callers are unaffected.
+
+        ``pace_ratio`` throttles the scan to leave the game responsive: after each chunk we sleep
+        ``elapsed * pace_ratio`` (0 = full speed). A long sweep otherwise reads hundreds of MB of the
+        game's memory back-to-back, holding its mmap lock / saturating memory bandwidth enough to
+        microstutter the game; pacing caps our duty cycle (ratio 1.0 ≈ 50%, 2.0 ≈ 33%) so the game
+        gets lock-free windows between chunks. Used by the live name scanner; one-shot AOB scans
+        leave it 0.
         """
         rx = re.compile(pattern, re.DOTALL)
         overlap = max(len(pattern), 1024)
@@ -221,6 +230,7 @@ class LinuxProcessMemory:
         for region in scan_regions:
             pos = region.start
             while pos < region.end:
+                _t0 = time.monotonic() if pace_ratio else 0.0
                 size = min(_chunk, region.end - pos)
                 try:
                     buf = self.read(pos, size)
@@ -242,6 +252,8 @@ class LinuxProcessMemory:
                 if len(buf) < size:
                     break
                 pos += _chunk - overlap  # step back by overlap to catch boundary matches
+                if pace_ratio:
+                    time.sleep((time.monotonic() - _t0) * pace_ratio)  # yield proportional to work
         if not return_multiple:
             return None
         return found
