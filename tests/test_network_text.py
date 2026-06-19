@@ -396,6 +396,36 @@ def test_network_translate_fn_kaisetubun_uses_text_path(tmp_path):
     assert out is not None and "story so far" in out.lower()
 
 
+def test_is_bazaar_transaction_matches_only_buy_categories():
+    from dqxclarity.runtime.dispatch import _is_bazaar_transaction
+
+    assert _is_bazaar_transaction("This is <%dL_KAUKAZU> <%sL_KAITAI_ITEM>\nthat <%sL_URINUSI> has l")
+    assert _is_bazaar_transaction("Bought <%dM_item_num> <%sM_item><%sM_plusnum> from the Bazaar fo")
+    # ordinary categories are untouched
+    assert not _is_bazaar_transaction("<%sM_kaisetubun>")
+    assert not _is_bazaar_transaction("<%sM_npc>")
+    assert not _is_bazaar_transaction("<%sM_item>")
+
+
+def test_network_translate_fn_bazaar_transaction_passes_through(tmp_path):
+    """Bazaar buy-confirmation/receipt categories must return None (no write) even on a CACHE HIT.
+
+    The game reads that same buffer to execute the purchase, so any in-place write breaks buying
+    (proven by an A/B against the live game). Pre-storing a hit makes this strong: without the guard
+    the hit would be returned and written; with it, the category passes straight through.
+    """
+    c = TranslationCache(tmp_path / "bazaar.db")
+    ja = "これは2 やくそう\nアリエスが出品しています。"
+    c.store(ja, "TRANSLATED — MUST NOT BE WRITTEN", "community")  # a hit the guard must suppress
+    t = Translator(c)
+    buy_cat = "This is <%dL_KAUKAZU> <%sL_KAITAI_ITEM>\nthat <%sL_URINUSI> has l"
+    for cfg in (_cfg(), _legacy_cfg()):  # default "translate-the-rest" AND legacy routings
+        assert build_network_translate_fn(cfg, t)(ja, buy_cat) is None
+    # control: the SAME ja under a non-bazaar category DOES return the cache hit — proving it's the
+    # bazaar guard suppressing the write, not some unrelated filter.
+    assert build_network_translate_fn(_cfg(), t)(ja, "<%sM_prose>") == "TRANSLATED — MUST NOT BE WRITTEN"
+
+
 def test_network_translate_fn_kaisetubun_wraps_narrower_than_generic(tmp_path):
     # The Story So Far panel is narrower than the dialogue box, so the recap (<%sM_kaisetubun>) must
     # wrap to KAISETUBUN_WRAP — wider wrapping clips words off the panel's right edge. A generic

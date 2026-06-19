@@ -458,6 +458,22 @@ def _is_name_category(category: str) -> bool:
     return any(t in category for t in NAME_TAGS)
 
 
+# Bazaar (auction house) TRANSACTION categories: the buy-confirmation prompt
+# ("This is <%dL_KAUKAZU> <%sL_KAITAI_ITEM> that <%sL_URINUSI> has listed. Would you like to buy…")
+# and the post-purchase receipt ("Bought … from the Bazaar for …"). The game reads these SAME buffers
+# to execute the purchase, so MT-ing them in place corrupts the transaction and the buy FAILS — proven
+# by an A/B: capture-mode (no write) buys succeed, normal (write) buys fail. We pass them through
+# untouched (the template is already English from static data; only the JA seller name stays, which we
+# don't translate anyway). Markers are bazaar-buy-specific placeholder tokens + the receipt fragment.
+BAZAAR_TXN_MARKERS = ("URINUSI", "KAITAI_ITEM", "KAUKAZU", "from the Bazaar")
+
+
+def _is_bazaar_transaction(category: str) -> bool:
+    """A bazaar purchase confirmation / receipt category — must NEVER be translated in place (an
+    English overwrite of the buffer the game parses to transact breaks the purchase). Pass through."""
+    return any(m in category for m in BAZAAR_TXN_MARKERS)
+
+
 # The Story So Far panel is narrower than the dialogue box; its Japanese is pre-wrapped to ~16-20
 # full-width chars (≈40 half-width EN cols). 38 keeps EN safely inside the panel so no line clips.
 # NOTE: the panel's ◄ N/N ► navigation is per story CHAPTER, not per <br> sub-page — inserting <br>
@@ -575,6 +591,8 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         # additive, so it can't regress the whitelist and only the NEW content hits MT.
         # (The startup "Important Notice" is NOT a network_text category — it never flows through this
         # hook; it's a static memory buffer handled by runtime/notice_loop.py's scanner.)
+        if _is_bazaar_transaction(category):
+            return None  # bazaar buy-confirmation / receipt — never write it (breaks the purchase)
         if not is_japanese(ja):
             return None
         if category.startswith("Version <%s_MVER"):
@@ -598,6 +616,8 @@ def build_network_translate_fn(cfg, translator, *, wrap_width=None, lines_per_pa
         return translate_all_fn
 
     def translate_fn(ja: str, category: str) -> str | None:
+        if _is_bazaar_transaction(category):
+            return None  # bazaar buy-confirmation / receipt — never write it (breaks the purchase)
         if not is_japanese(ja):
             return None
         if category.startswith("Version <%s_MVER"):
