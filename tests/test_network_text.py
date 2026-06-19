@@ -426,6 +426,33 @@ def test_network_translate_fn_bazaar_transaction_passes_through(tmp_path):
     assert build_network_translate_fn(_cfg(), t)(ja, "<%sM_prose>") == "TRANSLATED — MUST NOT BE WRITTEN"
 
 
+# Real auction categories captured from a LIVE purchase (--capture-network). Pins the guard to the
+# actual game strings: the two transaction categories MUST pass through (or buying breaks again), and
+# every other auction-UI category MUST NOT be caught (or that text stops translating). Guards both
+# regression directions — under-catch (buy breaks) and over-catch (auction UI goes untranslated).
+_BAZAAR_TXN_CATEGORIES = [
+    "This is <%dL_KAUKAZU> <%sL_KAITAI_ITEM>\nthat <%sL_URINUSI> has l",
+    "Bought <%dM_item_num> <%sM_item><%sM_plusnum> from the Bazaar fo",
+]
+_BAZAAR_OTHER_CATEGORIES = [
+    "Bonus Time Remaining: <%2dM_mm> min.", "<%dM_00>", "<%sM_item><%sM_plusnum>", "<%'dM_00>",
+    "<%dM_Time> h. Left", "<%sM_tuyosa><%sM_hosi>", "<%sM_caption>", "Stock: <%dM_syozisuu>",
+    "<%'dM_Num> <%sM_Tani>", "<%sM_header>", "<%sM_item>", "<%dM_nn> more uses.", "<%sM_05>",
+    "Requires Lv <%dM_lv>", "<%dM_01>", "<%dM_02>", "<%dM_gold> Ｇ", "<%sM_01>",
+]
+
+
+def test_bazaar_guard_partition_on_real_captured_categories():
+    """Exact partition over the 20 real auction categories from a live buy: only the 2 transaction
+    strings pass through; the other 18 (item/stock/time/gold UI) are untouched and still translate."""
+    from dqxclarity.runtime.dispatch import _is_bazaar_transaction
+
+    for c in _BAZAAR_TXN_CATEGORIES:
+        assert _is_bazaar_transaction(c), f"transaction category must pass through: {c!r}"
+    for c in _BAZAAR_OTHER_CATEGORIES:
+        assert not _is_bazaar_transaction(c), f"non-transaction category must NOT be caught: {c!r}"
+
+
 def test_network_translate_fn_kaisetubun_wraps_narrower_than_generic(tmp_path):
     # The Story So Far panel is narrower than the dialogue box, so the recap (<%sM_kaisetubun>) must
     # wrap to KAISETUBUN_WRAP — wider wrapping clips words off the panel's right edge. A generic
