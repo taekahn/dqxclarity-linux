@@ -24,12 +24,17 @@ from .names_loop import ScannerHandle, translate_and_write_name
 
 @dataclass(frozen=True)
 class NameChain:
-    """A derived pointer chain from the module base to a name record.
+    """A derived pointer chain from the module base to a name record (or an array of them).
 
     ``root_offset`` is added to the image base to get the chain's first pointer slot; each entry in
     ``offsets`` is a dereference-then-add step; ``name_offset`` is the byte offset from the final
     record to the JA name string. ``write_prefix`` is the control prefix the game expects prepended
     to the written name (e.g. the nameplate "\\x04"); "" for most.
+
+    When ``stride`` is non-zero the chain resolves to the BASE of a fixed-stride array of records and
+    the reader walks up to ``count`` slots (``record + k*stride + name_offset``), stopping at the
+    first empty/garbage slot — this is how one chain covers a whole party (player + companions).
+    ``stride == 0`` (the default) is a single name.
     """
 
     kind: str
@@ -37,15 +42,20 @@ class NameChain:
     offsets: tuple[int, ...]
     name_offset: int
     write_prefix: str = ""
+    stride: int = 0
+    count: int = 1
 
 
 # Derived, BUILD-SPECIFIC name chains (re-derive on a game update via the pointer-scan tooling — treat
-# each like an AOB signature). The party chain reaches the player's party-panel slot name; companion/
+# each like an AOB signature). The party chain reaches the WHOLE party array (player + companions);
 # concierge/chat chains are TBD (those kinds still need the intrusive AOB scanner via --name-scan).
 NAME_CHAINS: tuple[NameChain, ...] = (
-    # party: the player's own party-panel (player-slot) name. [base + 0x1c95fa0] -> +0x4 -> +0x4a4
-    # -> +0x377 -> record; JA name at record + 57. Proven against the live game (survives restart).
-    NameChain("party", 0x1C95FA0, (0x4, 0x4A4, 0x377), 57, ""),
+    # party: the whole party-member array. A static global (base+0x1c998bc) holds a constant pointer
+    # to a fixed "party manager" (0x02d79a88); from it [+0x68]->[+0x2c4]->[+0x50] reaches the array
+    # base. Members are 0x300 apart, JA name at offset 0; slot 0 = the player, 1+ = AI companions.
+    # Derived + validated across 8+ restart sessions and multiple zones via the snapshot/intersection
+    # tooling (the manager pointer is the cross-session invariant; the array itself moves every run).
+    NameChain("party", 0x1C998BC, (0x68, 0x2C4, 0x50), 0, "", stride=0x300, count=8),
 )
 
 
@@ -101,10 +111,12 @@ def run_chains(
     """Poll ``chains`` until ``stop`` is set, translating each resolved name in place.
 
     Each tick, for every chain: resolve it. A chain that fails to resolve (broken pointer / null
-    deref) marks its kind ``broken`` and is skipped this tick. A resolved chain reads the JA name at
-    ``record + name_offset`` and, if it's Japanese, translates+writes it via the SHARED helper (the
-    exact same code path as the AOB scanner). Resolved vs broken kinds are tracked on the returned
-    ChainStats so the CLI can warn when a chain stops resolving (likely a game update).
+    deref) marks its kind ``broken`` and is skipped this tick. A resolved chain reads the JA name(s)
+    at ``record + name_offset`` — a single name, or (when ``stride`` is set) every member of a
+    fixed-stride array up to ``count``, stopping at the first empty/garbage slot — and translates+
+    writes each Japanese one via the SHARED helper (the exact same code path as the AOB scanner).
+    Resolved vs broken kinds are tracked on the returned ChainStats so the CLI can warn when a chain
+    stops resolving (likely a game update).
     """
     stats = ChainStats()
     while not stop.is_set():
@@ -118,13 +130,25 @@ def run_chains(
                 continue
             stats.resolved.add(chain.kind)
             stats.broken.discard(chain.kind)
-            written = translate_and_write_name(
-                mem, translator, rec + chain.name_offset, chain.write_prefix, on_write=on_write
-            )
-            if written is not None:
-                stats.written += 1
-                if len(stats.samples) < 10 and written not in stats.samples:
-                    stats.samples.append(written)
+            for k in range(chain.count if chain.stride else 1):
+                addr = rec + k * chain.stride + chain.name_offset
+                # Array walk: stop at the first empty / non-text-binary slot (past the last member).
+                # A real name (JA, or already-English after we translated it) is neither; the U+FFFD
+                # replacement char means decode hit raw binary -> we've run off the end of the party.
+                if chain.stride:
+                    try:
+                        raw = mem.read_cstring(addr, 64)
+                    except (struct.error, OSError):
+                        break
+                    if not raw or "�" in raw:
+                        break
+                written = translate_and_write_name(
+                    mem, translator, addr, chain.write_prefix, on_write=on_write
+                )
+                if written is not None:
+                    stats.written += 1
+                    if len(stats.samples) < 10 and written not in stats.samples:
+                        stats.samples.append(written)
         if profiler is not None:
             profiler.record(
                 "namechain", "poll", time.monotonic() - _t,

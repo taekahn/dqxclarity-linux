@@ -264,6 +264,54 @@ def test_run_chains_player_name_precedence():
     assert "Taikan" in text and "Squid" not in text
 
 
+class _ArrayMem:
+    """Resolves a stride chain to an array base, serves N JA members then a binary-garbage slot."""
+
+    def __init__(self, base, chain, members):
+        self._members = members
+        self._stride = chain.stride
+        self.writes = []
+        self._record = 0x700000
+        ptr = base + chain.root_offset
+        self._graph = {}
+        cur = 0x500000
+        for off in chain.offsets[:-1]:
+            self._graph[ptr] = cur
+            ptr = cur + off
+            cur += 0x100000
+        self._graph[ptr] = self._record - chain.offsets[-1]
+        self._base_addr = self._record + chain.name_offset
+
+    def read_u32(self, addr):
+        return self._graph.get(addr, 0)
+
+    def read_cstring(self, addr, n=64):
+        if self._stride and addr >= self._base_addr:
+            k, rem = divmod(addr - self._base_addr, self._stride)
+            if rem == 0 and 0 <= k < len(self._members):
+                return self._members[k]
+            if rem == 0 and k == len(self._members):
+                return "��"  # binary garbage past the last member -> walk must stop here
+        return ""
+
+    def write_cstring(self, addr, text, *, max_bytes):
+        self.writes.append((addr, text))
+        return True
+
+
+def test_run_chains_walks_member_array_and_stops_at_garbage():
+    """A stride chain translates EVERY member (player + companions) and stops at the garbage slot."""
+    base = 0x400000
+    chain = NameChain("party", 0x1000, (0x4, 0x8, 0x10), 0, "", stride=0x300, count=8)
+    mem = _ArrayMem(base, chain, ["タイカン", "ツナーム", "ヘスティ"])
+    stats = name_chains.run_chains(
+        mem, _ChainTranslator(), base, [chain], stop=_OneTickStop(), interval=0
+    )
+    # Exactly the 3 members, written at the strided slot addresses; the 4th (garbage) slot stops it.
+    assert [a for a, _ in mem.writes] == [mem._base_addr + k * 0x300 for k in range(3)]
+    assert stats.written == 3
+
+
 # =============================================================================================== #
 # start_chain_reader — per-attach daemon-thread helper                                             #
 # =============================================================================================== #
@@ -329,7 +377,10 @@ def test_name_chains_default_covers_party():
     kinds = {c.kind for c in name_chains.NAME_CHAINS}
     assert "party" in kinds
     party = next(c for c in name_chains.NAME_CHAINS if c.kind == "party")
-    assert party.root_offset == 0x1C95FA0
-    assert party.offsets == (0x4, 0x4A4, 0x377)
-    assert party.name_offset == 57
+    # Manager-anchored whole-party array chain (derived + validated across 8+ restart sessions).
+    assert party.root_offset == 0x1C998BC
+    assert party.offsets == (0x68, 0x2C4, 0x50)
+    assert party.name_offset == 0
     assert party.write_prefix == ""
+    assert party.stride == 0x300  # member array: one chain covers player + all companions
+    assert party.count > 1
